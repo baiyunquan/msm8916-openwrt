@@ -44,6 +44,7 @@ jobs:
         uses: actions/checkout@v5
         with:
           fetch-depth: 0
+          submodules: recursive
 
       - name: Work out which boards this pull request touches
         id: pick
@@ -89,22 +90,44 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v5
+        with:
+          submodules: recursive
 
       - name: Free disk space on runner
         run: |
           sudo rm -rf /usr/share/dotnet /etc/mysql /etc/php /usr/local/lib/android
           sudo apt-get clean
 
-      - name: Cache OpenWrt downloads & toolchain
-        uses: actions/cache@v5
+      - name: Restore OpenWrt downloads and toolchain
+        uses: actions/cache/restore@v5
         with:
           path: |
             openwrt/dl
             openwrt/staging_dir/toolchain-aarch64_generic_gcc-14.3.0_musl
             openwrt/staging_dir/host
-          key: openwrt-pr-cache-${{ hashFiles('version', 'diffconfigs/hmuf02v5') }}
+          key: openwrt-downloads-v1-${{ hashFiles('devenv/.env', 'devenv/dependencies.sh') }}
           restore-keys: |
+            openwrt-downloads-v1-${{ hashFiles('devenv/.env', 'devenv/dependencies.sh') }}-
+            openwrt-cache-
             openwrt-pr-cache-
+
+      - name: Restore ccache
+        uses: actions/cache/restore@v5
+        with:
+          path: ccache
+          key: openwrt-ccache-v1-${{ hashFiles('devenv/.env', 'devenv/dependencies.sh') }}
+          restore-keys: openwrt-ccache-v1-${{ hashFiles('devenv/.env', 'devenv/dependencies.sh') }}-
+
+      - name: Restore HMUF02V5 build intermediates
+        if: matrix.device == 'hmuf02v5'
+        uses: actions/cache/restore@v5
+        with:
+          path: |
+            openwrt/build_dir
+            openwrt/staging_dir/target-aarch64_generic_musl
+            openwrt/.hmuf02v5-cache-state
+          key: openwrt-hmuf02v5-v1-${{ hashFiles('version', 'devenv/.env', 'devenv/dependencies.sh', 'devenv/Dockerfile', 'build.sh', 'scripts/openwrt-prepare.sh', 'scripts/configure-openwrt-ccache.sh', 'scripts/openwrt_intermediate_cache.py', 'diffconfigs/hmuf02v5', 'msm89xx/**', 'packages/**', 'openwrt-overlay/**', 'openwrt-patches/**') }}
+          restore-keys: openwrt-hmuf02v5-v1-${{ hashFiles('version', 'devenv/.env', 'devenv/dependencies.sh', 'devenv/Dockerfile', 'build.sh', 'scripts/openwrt-prepare.sh', 'scripts/configure-openwrt-ccache.sh', 'scripts/openwrt_intermediate_cache.py', 'diffconfigs/hmuf02v5', 'msm89xx/**', 'packages/**', 'openwrt-overlay/**', 'openwrt-patches/**') }}-
 
       - name: Prepare OpenWrt tree
         run: ./build.sh prepare

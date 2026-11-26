@@ -6,6 +6,8 @@ openwrt/
 
 # Temporary build cache (if you ever create it)
 dl/
+ccache/
+devenv/.builder-image-fingerprint
 
 # Recovery images (build output of ./build-recovery.sh)
 msm89xx/recovery/*.img

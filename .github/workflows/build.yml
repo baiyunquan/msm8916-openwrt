@@ -37,12 +37,19 @@ env:
 permissions:
   contents: read
 
+concurrency:
+  # Serialize the shared cache writers with firmware releases.
+  group: ${{ github.ref == 'refs/heads/main' && 'release-build' || format('openwrt-builder-{0}', github.ref) }}
+  queue: max
+  cancel-in-progress: false
+
 jobs:
   setup:
     name: Resolve device list
     runs-on: ubuntu-24.04
     outputs:
       devices: ${{ steps.pick.outputs.devices }}
+      ccache_provider: ${{ steps.pick.outputs.ccache_provider }}
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -53,20 +60,38 @@ jobs:
           DEVICE: ${{ inputs.device }}
         run: |
           set -euo pipefail
+          boards=()
           if [ -z "$DEVICE" ] || [ "$DEVICE" = "all" ]; then
-            # Derived from the tree, not listed here: the previous hardcoded
-            # list had already drifted - uf896 was missing, so "all" silently
-            # built seven of the eight boards.
-            LIST=$(ls diffconfigs | sed 's/.*/"&"/' | paste -sd, -)
+            while IFS= read -r board; do
+              boards+=("$board")
+            done < <(find diffconfigs -maxdepth 1 -type f -printf '%f\n' | sort)
           else
-            LIST="\"$DEVICE\""
+            read -r -a boards <<< "$DEVICE"
           fi
-          echo "devices=[$LIST]" >> "$GITHUB_OUTPUT"
-          echo "::notice::Building [$LIST]"
+          if [ "${#boards[@]}" -eq 0 ]; then
+            echo "::error::No board selected."
+            exit 1
+          fi
+          for board in "${boards[@]}"; do
+            if [ ! -f "diffconfigs/$board" ]; then
+              echo "::error::Unknown board '$board'."
+              exit 1
+            fi
+          done
+          LIST="$(python3 scripts/action_cache.py boards-json "${boards[@]}")"
+          CCACHE_PROVIDER="$(python3 scripts/action_cache.py provider "${boards[@]}")"
+          {
+            echo "devices=$LIST"
+            echo "ccache_provider=$CCACHE_PROVIDER"
+          } >> "$GITHUB_OUTPUT"
+          echo "::notice::Building $LIST; ccache provider: $CCACHE_PROVIDER"
 
   build:
     needs: setup
     runs-on: ubuntu-22.04
+    permissions:
+      actions: write
+      contents: read
 
     strategy:
       fail-fast: false
@@ -76,6 +101,8 @@ jobs:
     steps:
     - name: Checkout
       uses: actions/checkout@v5
+      with:
+        submodules: recursive
 
     - name: Free disk space on runner
       run: |
@@ -89,18 +116,42 @@ jobs:
         echo "version=$VERSION" >> "$GITHUB_OUTPUT"
         echo "FILE_DATE=$(date +%Y%m%d%H%M)" >> "$GITHUB_ENV"
 
-    - name: Cache OpenWrt downloads & toolchain
-      uses: actions/cache@v5
+    - name: Restore OpenWrt downloads and toolchain
+      id: downloads-cache
+      uses: actions/cache/restore@v5
       with:
         path: |
           openwrt/dl
           openwrt/staging_dir/toolchain-aarch64_generic_gcc-14.3.0_musl
           openwrt/staging_dir/host
-        key: openwrt-cache-${{ steps.vars.outputs.version }}-${{ hashFiles('openwrt/feeds.conf.default', 'diffconfigs/hmuf02v5') }}
+        key: openwrt-downloads-v1-${{ hashFiles('devenv/.env', 'devenv/dependencies.sh') }}-${{ github.run_id }}-${{ github.run_attempt }}
         restore-keys: |
-          openwrt-cache-${{ steps.vars.outputs.version }}-${{ hashFiles('openwrt/feeds.conf.default', 'diffconfigs/hmuf02v5') }}-
+          openwrt-downloads-v1-${{ hashFiles('devenv/.env', 'devenv/dependencies.sh') }}-
           openwrt-cache-${{ steps.vars.outputs.version }}-
           openwrt-cache-
+          openwrt-pr-cache-
+
+    - name: Restore ccache
+      id: ccache-cache
+      uses: actions/cache/restore@v5
+      with:
+        path: ccache
+        key: openwrt-ccache-v1-${{ hashFiles('devenv/.env', 'devenv/dependencies.sh') }}-${{ github.run_id }}-${{ github.run_attempt }}
+        restore-keys: |
+          openwrt-ccache-v1-${{ hashFiles('devenv/.env', 'devenv/dependencies.sh') }}-
+
+    - name: Restore HMUF02V5 build intermediates
+      id: hmuf-cache
+      if: matrix.device == 'hmuf02v5'
+      uses: actions/cache/restore@v5
+      with:
+        path: |
+          openwrt/build_dir
+          openwrt/staging_dir/target-aarch64_generic_musl
+          openwrt/.hmuf02v5-cache-state
+        key: openwrt-hmuf02v5-v1-${{ hashFiles('version', 'devenv/.env', 'devenv/dependencies.sh', 'devenv/Dockerfile', 'build.sh', 'scripts/openwrt-prepare.sh', 'scripts/configure-openwrt-ccache.sh', 'scripts/openwrt_intermediate_cache.py', 'diffconfigs/hmuf02v5', 'msm89xx/**', 'packages/**', 'openwrt-overlay/**', 'openwrt-patches/**') }}-${{ github.run_id }}-${{ github.run_attempt }}
+        restore-keys: |
+          openwrt-hmuf02v5-v1-${{ hashFiles('version', 'devenv/.env', 'devenv/dependencies.sh', 'devenv/Dockerfile', 'build.sh', 'scripts/openwrt-prepare.sh', 'scripts/configure-openwrt-ccache.sh', 'scripts/openwrt_intermediate_cache.py', 'diffconfigs/hmuf02v5', 'msm89xx/**', 'packages/**', 'openwrt-overlay/**', 'openwrt-patches/**') }}-
 
     - name: Build docker builder image & prepare OpenWrt tree
       env:
@@ -116,8 +167,61 @@ jobs:
         printf '%s\n' "$APK_SIGNING_KEY" > openwrt/private-key.pem
 
     - name: Compile the firmware
-      run: |
-        ./build.sh build ${{ matrix.device }}
+      run: ./build.sh build "${{ matrix.device }}"
+
+    - name: Save OpenWrt downloads and toolchain
+      if: github.ref == 'refs/heads/main' && matrix.device == needs.setup.outputs.ccache_provider
+      continue-on-error: true
+      uses: actions/cache/save@v5
+      with:
+        path: |
+          openwrt/dl
+          openwrt/staging_dir/toolchain-aarch64_generic_gcc-14.3.0_musl
+          openwrt/staging_dir/host
+        key: openwrt-downloads-v1-${{ hashFiles('devenv/.env', 'devenv/dependencies.sh') }}-${{ github.run_id }}-${{ github.run_attempt }}
+
+    - name: Retire older downloads caches after upload
+      if: always() && github.ref == 'refs/heads/main' && matrix.device == needs.setup.outputs.ccache_provider
+      continue-on-error: true
+      env:
+        GH_TOKEN: ${{ github.token }}
+        CACHE_KEY: openwrt-downloads-v1-${{ hashFiles('devenv/.env', 'devenv/dependencies.sh') }}-${{ github.run_id }}-${{ github.run_attempt }}
+      run: python3 scripts/action_cache.py prune-after-save "$CACHE_KEY"
+
+    - name: Save ccache
+      if: github.ref == 'refs/heads/main' && matrix.device == needs.setup.outputs.ccache_provider
+      continue-on-error: true
+      uses: actions/cache/save@v5
+      with:
+        path: ccache
+        key: openwrt-ccache-v1-${{ hashFiles('devenv/.env', 'devenv/dependencies.sh') }}-${{ github.run_id }}-${{ github.run_attempt }}
+
+    - name: Retire older ccache entries after upload
+      if: always() && github.ref == 'refs/heads/main' && matrix.device == needs.setup.outputs.ccache_provider
+      continue-on-error: true
+      env:
+        GH_TOKEN: ${{ github.token }}
+        CACHE_KEY: openwrt-ccache-v1-${{ hashFiles('devenv/.env', 'devenv/dependencies.sh') }}-${{ github.run_id }}-${{ github.run_attempt }}
+      run: python3 scripts/action_cache.py prune-after-save "$CACHE_KEY"
+
+    - name: Save HMUF02V5 build intermediates
+      if: github.ref == 'refs/heads/main' && matrix.device == 'hmuf02v5'
+      continue-on-error: true
+      uses: actions/cache/save@v5
+      with:
+        path: |
+          openwrt/build_dir
+          openwrt/staging_dir/target-aarch64_generic_musl
+          openwrt/.hmuf02v5-cache-state
+        key: openwrt-hmuf02v5-v1-${{ hashFiles('version', 'devenv/.env', 'devenv/dependencies.sh', 'devenv/Dockerfile', 'build.sh', 'scripts/openwrt-prepare.sh', 'scripts/configure-openwrt-ccache.sh', 'scripts/openwrt_intermediate_cache.py', 'diffconfigs/hmuf02v5', 'msm89xx/**', 'packages/**', 'openwrt-overlay/**', 'openwrt-patches/**') }}-${{ github.run_id }}-${{ github.run_attempt }}
+
+    - name: Retire older HMUF02V5 caches after upload
+      if: always() && github.ref == 'refs/heads/main' && matrix.device == 'hmuf02v5'
+      continue-on-error: true
+      env:
+        GH_TOKEN: ${{ github.token }}
+        CACHE_KEY: openwrt-hmuf02v5-v1-${{ hashFiles('version', 'devenv/.env', 'devenv/dependencies.sh', 'devenv/Dockerfile', 'build.sh', 'scripts/openwrt-prepare.sh', 'scripts/configure-openwrt-ccache.sh', 'scripts/openwrt_intermediate_cache.py', 'diffconfigs/hmuf02v5', 'msm89xx/**', 'packages/**', 'openwrt-overlay/**', 'openwrt-patches/**') }}-${{ github.run_id }}-${{ github.run_attempt }}
+      run: python3 scripts/action_cache.py prune-after-save "$CACHE_KEY"
 
     - name: Organize files
       id: organize
@@ -142,3 +246,20 @@ jobs:
           ${{ env.FIRMWARE }}/*-msm89xx-*.manifest
           ${{ env.FIRMWARE }}/*-msm89xx-*-flash.sh
           ${{ env.FIRMWARE }}/*-msm89xx-*-firmware.zip
+
+  cache-cleanup:
+    name: Keep only the latest OpenWrt caches
+    needs: [setup, build]
+    if: always() && needs.setup.result == 'success' && needs.build.result != 'cancelled' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    continue-on-error: true
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+      - name: Prune superseded cache entries
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/action_cache.py prune

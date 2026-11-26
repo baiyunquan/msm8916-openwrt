@@ -104,6 +104,8 @@ Releases are serialised: every run rewrites the shared `gh-pages` feed and `firm
 overlapping runs would clobber each other. `cancel-in-progress` is **false** so a queued release
 waits rather than being killed by a later dispatch.
 
+The manual `OpenWrt Builder` workflow shares this group on `main` because it updates the same caches.
+
 > **Dispatch one release at a time.** GitHub keeps only **one pending run** per concurrency group,
 > so a third dispatch silently cancels the queued one. It never shows up as a failure. Check
 > `gh run list` before dispatching again.
@@ -118,17 +120,17 @@ waits rather than being killed by a later dispatch.
 
 ### Job `build` — one runner per board
 
-`fail-fast: false`, so one broken board does not cancel the other seven.
+`fail-fast: false`, so one broken board does not cancel the remaining builds.
 
 | Step | What it does |
 |---|---|
 | Checkout | `fetch-depth: 0` for tag metadata |
 | Free disk | drops .NET/MySQL/PHP/Android SDK, ~35 GB back |
-| Restore cache | `actions/cache/restore` only — see section 8 |
+| Restore caches | Downloads/toolchain and ccache for every board; HMUF intermediates only for HMUF02V5 — see section 8 |
 | Prepare + key | `./build.sh prepare`, then writes `APK_SIGNING_KEY` to `openwrt/private-key.pem` |
 | Build `<board>` | `./build.sh build <board>` |
 | CUPS | first board only — the package feed is target-wide, not per-board |
-| Save cache | first board only |
+| Save caches | HMUF02V5 updates downloads, ccache, and its intermediates; without HMUF02V5, the first selected board updates downloads and ccache |
 | Upload | `board-<name>` artifact, plus `feeds` from the first board |
 
 The signing key is written **after** `prepare`: a fresh prepare clones the OpenWrt tree and would
@@ -494,40 +496,38 @@ gh workflow run publish-package.yml --ref main \
 
 ## 8. Caching
 
-Three directories are cached, roughly 4.5 GB together:
+The workflows keep at most one current entry in each of these three cache families:
 
-1. `openwrt/dl` — upstream tarballs.
-2. `openwrt/staging_dir/toolchain-aarch64_generic_gcc-14.3.0_musl` — the cross-toolchain.
-3. `openwrt/staging_dir/host` — host build tools.
+1. **Downloads and base toolchain:** `openwrt/dl`, the AArch64 toolchain, and host tools.
+2. **Compiler cache:** `ccache/`, capped at 4 GB with OpenWrt's `CONFIG_CCACHE` support.
+3. **HMUF02V5 build intermediates:** `openwrt/build_dir`, the target staging directory, and a
+   small state file. This cache is restored and updated only by HMUF02V5 jobs; another board never
+   inherits its board configuration's object tree. Its key fingerprints the HMUF config, source
+   trees, OpenWrt pin, and toolchain setup. The state file also checks the actual feed revisions and
+   resolved `.config`; a mismatch clears the restored intermediates while leaving ccache intact.
+   Before compiling HMUF, source file timestamps are normalized. OpenWrt's default package and
+   kernel stamps include source mtimes, so this keeps unchanged cached build trees incremental across
+   fresh runner checkouts.
 
-```yaml
-- name: Restore OpenWrt Cache
-  uses: actions/cache/restore@v4
-  with:
-    path: |
-      openwrt/dl
-      openwrt/staging_dir/toolchain-aarch64_generic_gcc-14.3.0_musl
-      openwrt/staging_dir/host
-    key: openwrt-cache-${{ needs.setup.outputs.version }}-${{ hashFiles('openwrt/feeds.conf.default', 'diffconfigs/hmuf02v5') }}
-    restore-keys: |
-      openwrt-cache-${{ needs.setup.outputs.version }}-${{ hashFiles('openwrt/feeds.conf.default', 'diffconfigs/hmuf02v5') }}-
-      openwrt-cache-${{ needs.setup.outputs.version }}-
-      openwrt-cache-
-```
+HMUF02V5 provides ccache whenever it is selected. If it is absent, the first selected board updates
+ccache and the downloads cache. Only a selected HMUF02V5 job updates its intermediate cache. PR,
+package, and kernel-module workflows restore the caches but do not create additional entries.
 
-Three rules keep this affordable:
+Downloads and ccache keys use the OpenWrt pin and toolchain dependencies, not the firmware `-rN`
+revision, so a firmware version bump still restores them. HMUF intermediate keys also include the
+firmware version and source/config fingerprints. Cache keys include the run ID and attempt because
+GitHub cache entries cannot be overwritten. Each provider uploads its replacement, then retires the
+older entry in that family only if GitHub reports the new key. After the matrix finishes,
+`scripts/action_cache.py prune` keeps the newest entry in each family and
+removes older entries and legacy OpenWrt cache keys. Cache writes and pruning run only on `main`; the
+manual builder and release workflow share the `release-build` concurrency group to prevent
+overlapping cache updates. Cleanup logs the combined size of the three managed entries and warns if
+they exceed the 10 GB Actions cache quota.
 
-1. **No `${{ github.run_id }}` in the key.** A run-scoped key can never be restored, so every run
-   saved a fresh ~2.3 GB copy. Four of those fill the 10 GB budget, entries get evicted, and later
-   runs silently fall back to a stale prefix.
-2. **Restore-only in the matrix, save once.** Eight parallel jobs each pushing 2.3 GB would blow the
-   budget in one run. The matrix uses `actions/cache/restore`; only the `first` board job runs
-   `actions/cache/save`.
-3. **The hash input must exist.** An earlier key hashed `diffconfigs/hmu05`, a board that no longer
-   exists — `hashFiles` silently returns an empty hash for a missing path, so the key was constant.
-
-Cold cache is about 75 minutes for a full release. Warm, the toolchain and `dl/` restore in a couple
-of minutes and the boards build in parallel, so wall-clock is roughly one board's build.
+`build.sh` enables ccache for every board build, points it at `/repo/ccache`, and enforces the 4 GB
+limit. It rebuilds the Docker builder image when the dependency image fingerprint changes. Its
+OpenWrt checkout step preserves cached `dl`, `build_dir`, target staging, and the HMUF cache state
+when it clones a fresh source tree.
 
 ---
 

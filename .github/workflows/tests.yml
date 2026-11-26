@@ -46,6 +46,9 @@ jobs:
           PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ' ') }}
         run: bash scripts/branch-guard.sh "$HEAD_REF" "$BASE_REF" "$PR_LABELS"
 
+      - name: OpenWrt cache policy
+        run: python3 -m unittest discover -s scripts/tests -p 'test_*.py' -v
+
       # Hardware-free tests: no modem, no root, no OpenWrt. Each suite is a
       # tests/<name>/run.sh that exits non-zero on failure. --self-check also
       # applies mutants and requires each one to be caught.

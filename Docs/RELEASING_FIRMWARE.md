@@ -441,7 +441,7 @@ manifest lands.
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| Release dies at "Prepare OpenWrt Tree", `git clone` exit 128 | `actions/cache` pre-created `openwrt/` | handled in `clone_openwrt` (temp clone + swap) |
+| Release dies at "Prepare OpenWrt Tree", `git clone` exit 128 | Actions restored `openwrt/dl`, `build_dir`, or `staging_dir` before checkout | handled in `clone_openwrt` (temp clone + swap, preserving cached trees) |
 | Every device reports the previous release | `CONFIG_VERSION_NUMBER` stale | automatic since the `build.sh` stamp — verify with §2 |
 | Upgrade offered but `do_upgrade` refuses | device is below `min_version` (`25.12.6-r1`) | flash manually once; the floor only moves for a genuinely un-flashable jump |
 | Feed 404 after a release | only `releases/<version>` published | the workflow publishes `releases/<base>` too — check both |

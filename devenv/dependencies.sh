@@ -5,6 +5,7 @@ export DEBIAN_FRONTEND=noninteractive
 # Including: build essentials, ARM toolchains, development libraries, and utilities
 apt-get update && apt-get install -y --no-install-recommends \
     mkbootimg \
+    ccache \
     asciidoc help2man xsltproc \
     bash bc binutils bzip2 make patch time \
     device-tree-compiler \

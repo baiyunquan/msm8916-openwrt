@@ -35,6 +35,7 @@ OPENWRT_VERSION_SCRIPT="$SCRIPTS_DIR/openwrt-version.sh"
 OPENWRT_PREPARE_SCRIPT="$SCRIPTS_DIR/openwrt-prepare.sh"
 
 COMPOSE_FILE="$REPO_DIR/devenv/docker-compose.yml"
+BUILDER_IMAGE_FINGERPRINT_FILE="$REPO_DIR/devenv/.builder-image-fingerprint"
 
 ###############################################################################
 # Container paths
@@ -193,17 +194,35 @@ builder_image_exists() {
 
 build_image() {
 
+    local fingerprint
+    fingerprint="$(builder_image_fingerprint)"
+
     msg "Building Docker image..."
 
     docker_compose build
+
+    printf '%s\n' "$fingerprint" > "$BUILDER_IMAGE_FINGERPRINT_FILE"
 
     rm -f "$OPENWRT_DIR/.builder-state"
 
     ok "Docker image is ready."
 }
 
+builder_image_fingerprint() {
+
+    (
+        cd "$REPO_DIR"
+        sha256sum devenv/Dockerfile devenv/dependencies.sh devenv/docker-compose.yml |
+            sha256sum | awk '{print $1}'
+    )
+}
+
 ensure_builder() {
-    if ! builder_image_exists; then
+    local expected actual
+    expected="$(builder_image_fingerprint)"
+    actual="$(cat "$BUILDER_IMAGE_FINGERPRINT_FILE" 2>/dev/null || true)"
+
+    if ! builder_image_exists || [ "$actual" != "$expected" ]; then
         build_image
     fi
 
@@ -243,21 +262,24 @@ clone_openwrt() {
 
     if [ -d "$OPENWRT_DIR" ] && [ -n "$(ls -A "$OPENWRT_DIR" 2>/dev/null)" ]; then
         # The destination exists but is not a git checkout.  This is the CI
-        # case: actions/cache restores openwrt/dl + openwrt/staging_dir/*, which
-        # pre-creates $OPENWRT_DIR without a .git.  git clone refuses a
-        # non-empty destination, so clone into a temp dir, move the cached
-        # subtrees into it, and swap the result into place (same filesystem,
-        # so the moves are renames).
+        # case: Actions restores cached OpenWrt subtrees (dl, build_dir and
+        # staging_dir), which pre-creates $OPENWRT_DIR without a .git.  git
+        # clone refuses a non-empty destination, so clone into a temp dir, move
+        # the cached subtrees into it, and swap the result into place (same
+        # filesystem, so the moves are renames).
         local tmp
         tmp="$(mktemp -d "${OPENWRT_DIR}.tmp.XXXXXX")"
         git clone \
             https://git.openwrt.org/openwrt/openwrt.git \
             "$tmp/openwrt"
-        if [ -e "$OPENWRT_DIR/dl" ]; then
-            mv "$OPENWRT_DIR/dl" "$tmp/openwrt/"
-        fi
-        if [ -e "$OPENWRT_DIR/staging_dir" ]; then
-            mv "$OPENWRT_DIR/staging_dir" "$tmp/openwrt/"
+        local cached_tree
+        for cached_tree in dl build_dir staging_dir; do
+            if [ -e "$OPENWRT_DIR/$cached_tree" ]; then
+                mv "$OPENWRT_DIR/$cached_tree" "$tmp/openwrt/"
+            fi
+        done
+        if [ -e "$OPENWRT_DIR/.hmuf02v5-cache-state" ]; then
+            mv "$OPENWRT_DIR/.hmuf02v5-cache-state" "$tmp/openwrt/"
         fi
         rm -rf "$OPENWRT_DIR"
         mv "$tmp/openwrt" "$OPENWRT_DIR"
@@ -803,11 +825,31 @@ prepare_config() {
             cp $CONTAINER_REPO_DIR/diffconfigs/$board .config &&
             if [ -n '$release' ]; then
                 sed -i 's|^CONFIG_VERSION_NUMBER=.*|CONFIG_VERSION_NUMBER=\"$release\"|' .config
-            fi
+            fi &&
+            sh /repo/scripts/configure-openwrt-ccache.sh .config
         "
     fi
 
     run_openwrt_make "make defconfig V=sc"
+
+    # DRY_RUN deliberately leaves the current config untouched.
+    if [ "${DRY_RUN:-0}" = "1" ]; then
+        return
+    fi
+
+    if ! docker_exec bash -lc "
+        cd $CONTAINER_OPENWRT_DIR &&
+        grep -qx 'CONFIG_CCACHE=y' .config &&
+        grep -qx 'CONFIG_CCACHE_DIR=\"/repo/ccache\"' .config
+    "; then
+        die "OpenWrt defconfig did not retain the shared ccache configuration."
+    fi
+
+    docker_exec env CCACHE_DIR=/repo/ccache ccache --max-size=4G
+
+    if [ "${GITHUB_ACTIONS:-}" = "true" ] && [ "$board" = "hmuf02v5" ]; then
+        python3 "$SCRIPTS_DIR/openwrt_intermediate_cache.py" prepare "$OPENWRT_DIR"
+    fi
 }
 
 # Ensure a usable .config before a selective build.
@@ -922,6 +964,12 @@ build_target() {
     fi
 
     run_openwrt_make "make -j\$((\$(nproc)+1)) V=sc"
+
+    if [ "${GITHUB_ACTIONS:-}" = "true" ] &&
+       [ "${DRY_RUN:-0}" != "1" ] &&
+       [ "$board" = "hmuf02v5" ]; then
+        python3 "$SCRIPTS_DIR/openwrt_intermediate_cache.py" record "$OPENWRT_DIR"
+    fi
 }
 
 ###############################################################################
