@@ -146,7 +146,9 @@ posix_tz() {
 # (unset) clock and no zone.
 zone_from_nitz() {
 	[ -e "$QMI_DEV" ] || return 1
-	out=$(timeout 8 qmicli -d "$QMI_DEV" --dms-get-time 2>/dev/null) || return 1
+	# Share ModemManager's control channel: closing a direct WWAN QMI client
+	# can hang up its endpoint and trigger modem removal/reprobing.
+	out=$(timeout 8 qmicli -p -d "$QMI_DEV" --dms-get-time 2>/dev/null) || return 1
 	printf '%s\n' "$out" | grep -q "Time source: 'network'" || return 1
 
 	zone=$(printf '%s\n' "$out" | sed -n "s/.*Time zone: *'\(-\{0,1\}[0-9][0-9]*\)'.*/\1/p" | head -1)

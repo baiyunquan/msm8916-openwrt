@@ -87,6 +87,13 @@ fixture() {
 
 	cat > "$T/bin/qmicli" <<-'EOF'
 	#!/bin/sh
+	# A direct open/close disrupts the WWAN control channel owned by MM.
+	# Model a shared modem: only queries through qmi-proxy may succeed.
+	proxy=0
+	for arg in "$@"; do
+		case "$arg" in -p|--device-open-proxy) proxy=1 ;; esac
+	done
+	[ "$proxy" = 1 ] || exit 1
 	[ -s "$TEST_QMI" ] || exit 1
 	cat "$TEST_QMI"
 	EOF
