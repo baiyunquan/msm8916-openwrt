@@ -99,6 +99,22 @@ define Device/generic-ufi001b
 endef
 TARGET_DEVICES += generic-ufi001b
 
+define Device/generic-ufi103s-v05
+	$(Device/msm8916)
+	DEVICE_VENDOR := Generic
+	DEVICE_MODEL := UFI103S v05
+	DEVICE_DTS := msm8916-generic-ufi103s-v05
+	SUPPORTED_DEVICES := thwc,ufi103s-v05 thwc,ufi001c
+	FILESYSTEMS := squashfs
+	GPT_TOT_SECTORS := 7634944
+	DEVICE_PACKAGES := msm89xx-scripts wpad-basic-wolfssl rmtfs uci-usb-gadget \
+		block-mount f2fs-tools tar \
+		msm-firmware-dumper reboot-edl qcom-carrier-autocfg \
+		464xlat kmod-nat46 \
+		diag-efs diag-logtool msm89xx-firmware-upgrade luci-app-update-notify luci-app-led-setup
+endef
+TARGET_DEVICES += generic-ufi103s-v05
+
 define Device/generic-ufi003-mb-v02
 	$(Device/msm8916)
 	DEVICE_VENDOR := UFI

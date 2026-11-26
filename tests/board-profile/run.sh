@@ -157,6 +157,53 @@ for dev in $known_devices; do
     fi
 done
 
+# ---- 3a. UFI103S-v05 physical board contract -------------------------------
+section "UFI103S-v05 UFI001C hardware contract"
+UFI103S_DEVICE=generic-ufi103s-v05
+UFI103S_CFG=$ROOT/diffconfigs/ufi103s-v05
+if [ -f "$UFI103S_CFG" ] &&
+   grep -qx 'CONFIG_TARGET_msm89xx_msm8916_DEVICE_generic-ufi103s-v05=y' "$UFI103S_CFG"; then
+    ok "diffconfigs/ufi103s-v05 selects Device/$UFI103S_DEVICE"
+else
+    bad "diffconfigs/ufi103s-v05 does not select Device/$UFI103S_DEVICE"
+fi
+
+ufi103_dts=$(profile_field "$UFI103S_DEVICE" DEVICE_DTS)
+ufi103_supported=$(profile_field "$UFI103S_DEVICE" SUPPORTED_DEVICES)
+ufi103_gpt=$(profile_field "$UFI103S_DEVICE" GPT_TOT_SECTORS)
+if [ "$ufi103_dts" = "msm8916-generic-ufi103s-v05" ] &&
+   [ "$ufi103_supported" = "thwc,ufi103s-v05 thwc,ufi001c" ] &&
+   [ "$ufi103_gpt" = "7634944" ]; then
+    ok "Device/$UFI103S_DEVICE has its own DTB, UFI001C fallback and measured eMMC size"
+else
+    bad "Device/$UFI103S_DEVICE must select the expected DTB, compatible list and 7634944-sector GPT"
+fi
+
+ufi103_patch=$(dts_creator msm8916-generic-ufi103s-v05)
+if [ -z "$ufi103_patch" ]; then
+    bad "UFI103S-v05 DTS is not added by a kernel patch"
+else
+    for expected in \
+        'model = "UFI103S v05 4G Modem Stick";' \
+        'compatible = "thwc,ufi103s-v05", "thwc,ufi001c", "qcom,msm8916";' \
+        'gpios = <&tlmm 37 GPIO_ACTIVE_LOW>;' \
+        'gpios = <&tlmm 20 GPIO_ACTIVE_HIGH>;' \
+        'function = LED_FUNCTION_WLAN;' \
+        'gpios = <&tlmm 21 GPIO_ACTIVE_HIGH>;' \
+        'function = LED_FUNCTION_WAN;' \
+        'gpios = <&tlmm 22 GPIO_ACTIVE_HIGH>;' \
+        'gpios = <&tlmm 0 GPIO_ACTIVE_HIGH>;' \
+        'gpios = <&tlmm 1 GPIO_ACTIVE_HIGH>;' \
+        'gpios = <&tlmm 2 GPIO_ACTIVE_HIGH>;' \
+        'gpios = <&tlmm 3 GPIO_ACTIVE_HIGH>;'; do
+        if grep -Fq "$expected" "$ufi103_patch"; then
+            ok "UFI103S-v05 DTS includes $expected"
+        else
+            bad "UFI103S-v05 DTS is missing $expected"
+        fi
+    done
+fi
+
 # ---- 4. build.yml choice list matches diffconfigs/ -------------------------
 section "build.yml device list"
 choices=$(sed -n '/^ *options:/,/^ *[a-z_]*:/p' "$BUILD_YML" |

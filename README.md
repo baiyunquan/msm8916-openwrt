@@ -73,6 +73,7 @@ Recent additions on top of the base port:
 | **`mifid`** | `generic-mifid` | HM-MIFIB-V18 | MSM8916 | 512 MB | 4 GB eMMC | None (no LEDs); 128x128 ST7735S SPI LCD |
 | **`hmuf02v5`**   | `generic-hmuf02v5`   | HMUF02-V5 (was HMU05) (250605 V0S) | MSM8916 | 512 MB | 4 GB eMMC | Green / Blue / Red      |
 | **`ufi001b`** | `generic-ufi001b` | Generic UFI001B 4G Stick   | MSM8916 | 512 MB | 4 GB eMMC | Green / Blue / Red      |
+| **`ufi103s-v05`** | `generic-ufi103s-v05` | UFI103S v05 4G Modem Stick | MSM8916 | 512 MB | 4 GB eMMC | Blue WLAN / Green WAN / Red power |
 | **`ufi003`**  | `generic-ufi003-mb-v02` | UFI003 MB V02 (also sold as QRZL903-01) | MSM8916 | 512 MB | 4 GB eMMC | Green / Blue / Red      |
 | **`uz801`**   | `yiming-uz801v3`  | YiMing UZ801 v3 Dongle     | MSM8916 | 512 MB | 4 GB eMMC | Green / Blue / Red      |
 | **`uf02`**    | `generic-uf02`    | Generic UF02 / UF2 Stick   | MSM8916 | 512 MB | 4 GB eMMC | Green / Blue / Red      |
@@ -81,6 +82,10 @@ Recent additions on top of the base port:
 | **`uf896`**     | `generic-uf896`     | UF896 (v1.1) 4G LTE Router  | MSM8916 | 512 MB | 4 GB eMMC | Tri-colour + charger/network/wifi/data LEDs |
 | **`jz02`**      | `generic-jz02`      | JZ02 Battery MiFi (3 SIM switch lines) | MSM8916 | 512 MB | 4 GB eMMC | Network tri-colour + Wi-Fi red + battery red/green |
 | **`jz0145`**    | `generic-jz0145`    | JZ0145 V33 Stick | MSM8916 | 512 MB | 4 GB eMMC | Green / Blue / Red |
+
+The UFI103S-v05 profile follows the UFI001C GPIO layout documented in the
+MSM8916-postmarketOS tree. OpenWrt boot and peripheral behavior remain
+unvalidated on UFI103S-v05 hardware.
 
 ### Per-board feature matrix
 

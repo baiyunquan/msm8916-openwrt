@@ -1,0 +1,92 @@
+--- /dev/null
++++ b/arch/arm64/boot/dts/qcom/msm8916-generic-ufi103s-v05.dts
+@@ -0,0 +1,89 @@
++// SPDX-License-Identifier: GPL-2.0-only
++
++/dts-v1/;
++
++#include "msm8916-ufi.dtsi"
++
++#include <dt-bindings/gpio/gpio.h>
++#include <dt-bindings/leds/common.h>
++
++/ {
++	model = "UFI103S v05 4G Modem Stick";
++	compatible = "thwc,ufi103s-v05", "thwc,ufi001c", "qcom,msm8916";
++};
++
++&reserved_memory {
++	ramoops@8db00000 {
++		compatible = "ramoops";
++		reg = <0x0 0x8db00000 0x0 0x00100000>;
++		record-size = <0x00040000>;
++		console-size = <0x00040000>;
++		pmsg-size = <0x00040000>;
++	};
++};
++
++&button_restart {
++	gpios = <&tlmm 37 GPIO_ACTIVE_LOW>;
++};
++
++&button_default {
++	pins = "gpio37";
++	bias-pull-up;
++};
++
++/* UFI001C-compatible WLAN, WAN and power LED wiring. */
++&{/leds} {
++	/delete-node/ led-r;
++	/delete-node/ led-g;
++	/delete-node/ led-b;
++
++	led-wlan-blue {
++		function = LED_FUNCTION_WLAN;
++		color = <LED_COLOR_ID_BLUE>;
++		gpios = <&tlmm 20 GPIO_ACTIVE_HIGH>;
++		default-state = "off";
++	};
++
++	led-wan-green {
++		function = LED_FUNCTION_WAN;
++		color = <LED_COLOR_ID_GREEN>;
++		gpios = <&tlmm 21 GPIO_ACTIVE_HIGH>;
++		default-state = "off";
++	};
++
++	led-power-red {
++		function = LED_FUNCTION_POWER;
++		color = <LED_COLOR_ID_RED>;
++		gpios = <&tlmm 22 GPIO_ACTIVE_HIGH>;
++		default-state = "on";
++	};
++
++	/* SIM path selection lines, exposed like the pmOS UFI001C DTS. */
++	sim_sel {
++		label = "sim:sel";
++		gpios = <&tlmm 2 GPIO_ACTIVE_HIGH>;
++		default-state = "on";
++	};
++
++	sim_en {
++		label = "sim:en";
++		gpios = <&tlmm 1 GPIO_ACTIVE_HIGH>;
++		default-state = "off";
++	};
++
++	sim_sel2 {
++		label = "sim:sel2";
++		gpios = <&tlmm 0 GPIO_ACTIVE_HIGH>;
++		default-state = "off";
++	};
++
++	sim_en2 {
++		label = "sim:en2";
++		gpios = <&tlmm 3 GPIO_ACTIVE_HIGH>;
++		default-state = "off";
++	};
++};
++
++&gpio_leds_default {
++	pins = "gpio0", "gpio1", "gpio2", "gpio3", "gpio20", "gpio21", "gpio22";
++};
