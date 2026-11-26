@@ -111,7 +111,8 @@ define Device/generic-ufi103s-v05
 		block-mount f2fs-tools tar \
 		msm-firmware-dumper reboot-edl qcom-carrier-autocfg \
 		464xlat kmod-nat46 \
-		diag-efs diag-logtool msm89xx-firmware-upgrade luci-app-update-notify luci-app-led-setup
+		diag-efs diag-logtool msm89xx-firmware-upgrade luci-app-update-notify luci-app-led-setup \
+		kmod-sound-msm8916-voice alsa-utils ufi-voice ufi-voice-asterisk luci-app-ufi-voice
 endef
 TARGET_DEVICES += generic-ufi103s-v05
 
