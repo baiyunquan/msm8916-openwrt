@@ -39,7 +39,7 @@ while true; do
 	SMSD=$(echo "$SMSC" | tr -dc '0-9')
 	SMSD=${SMSD:-0}
 
-	if [ -z "$DEV" ] || [ -z "$LEDX" ]; then
+	if [ -z "$DEV" ]; then
 		sleep 15
 		continue
 	fi
@@ -61,6 +61,12 @@ while true; do
 			MODEM_PATH="$NEW"
 			MODEM_NUM=$(echo "$MODEM_PATH" | awk -F'/' '{print $NF}')
 		fi
+	fi
+
+	# Keep modem selection current even when SMS LED notifications are unused.
+	if [ -z "$LEDX" ]; then
+		sleep 15
+		continue
 	fi
 
 	# stdout is captured, not discarded -- redirecting it here made SMS_LIST

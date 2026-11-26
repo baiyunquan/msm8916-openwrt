@@ -23,6 +23,26 @@ function popTimeout(a, message, timeout, severity) {
     ui.addTimeLimitedNotification(a, message, timeout, severity);
 }
 
+function execText(args) {
+	return fs.exec('/usr/bin/mmcli', args).then(function(result) {
+		if (result.code !== 0)
+			throw new Error(result.stderr || _('ModemManager request failed'));
+		return result.stdout || '';
+	});
+}
+
+function resolveReadingModem() {
+	return execText(['-L']).then(function(output) {
+		let paths = output.match(/\/org\/freedesktop\/ModemManager1\/Modem\/\d+/g) || [];
+		let configured = uci.get('sms_manager', '@sms_manager[0]', 'readport');
+		if (paths.includes(configured))
+			return configured;
+		if (paths.length === 1)
+			return paths[0];
+		throw new Error(paths.length ? _('Please configure the SMS reading modem first') : _('No modem found'));
+	});
+}
+
 return view.extend({
 	load: function() {
 		document.head.append(E('style', {'type': 'text/css'},
@@ -114,8 +134,7 @@ return view.extend({
 			return;
 		}
 		
-		uci.load('sms_manager').then(function() {
-			let modemPath = uci.get('sms_manager', '@sms_manager[0]', 'readport');
+		uci.load('sms_manager').then(resolveReadingModem).then(function(modemPath) {
 			
 			if (!modemPath) {
 				ui.addNotification(null, E('p', _('Please set the modem for communication')), 'info');
@@ -320,8 +339,7 @@ return view.extend({
 	render: function() {
 		let self = this;
 		
-		return uci.load('sms_manager').then(function() {
-			let modemPath = uci.get('sms_manager', '@sms_manager[0]', 'readport');
+		return uci.load('sms_manager').then(resolveReadingModem).then(function(modemPath) {
 			let hideNumber = uci.get('sms_manager', '@sms_manager[0]', 'bnumber') || '';
 			let ledNotify = uci.get('sms_manager', '@sms_manager[0]', 'lednotify') || '0';
 			let ledType = uci.get('sms_manager', '@sms_manager[0]', 'ledtype') || 'S';
@@ -359,10 +377,11 @@ return view.extend({
 			} else {
 				let modemNum = modemPath.split('/').pop();
 				
-				L.resolveDefault(fs.exec_direct('/usr/bin/mmcli', ['-m', modemNum, '--messaging-list-sms']), null)
+				execText(['-m', modemNum, '--messaging-list-sms'])
 					.then(function(listRes) {
 						
 						if (!listRes) {
+							document.getElementById('storage-info').textContent = 'SIM: 0 / Memory: 0';
 							let emptyRow = E('tr', { 'class': 'tr placeholder' }, [
 								E('td', { 'class': 'td', 'colspan': '4', 'style': 'text-align:center; padding:20px;' }, 
 									_('No SMS messages found')
@@ -382,6 +401,7 @@ return view.extend({
 						
 						
 						if (smsIds.length === 0) {
+							document.getElementById('storage-info').textContent = 'SIM: 0 / Memory: 0';
 							let emptyRow = E('tr', { 'class': 'tr placeholder' }, [
 								E('td', { 'class': 'td', 'colspan': '4', 'style': 'text-align:center; padding:20px;' }, 
 									_('No SMS messages found')
@@ -392,7 +412,7 @@ return view.extend({
 						}
 						
 						let smsPromises = smsIds.map(function(smsId) {
-							return L.resolveDefault(fs.exec_direct('/usr/bin/mmcli', ['-s', smsId]), null);
+							return execText(['-s', smsId]);
 						});
 						
 						Promise.all(smsPromises).then(function(smsResults) {
@@ -535,10 +555,12 @@ return view.extend({
 								});
 							});
 						}).catch(function(err) {
+							document.getElementById('storage-info').textContent = _('Error loading SMS details');
 							ui.addNotification(null, E('p', _('Error loading SMS details: ') + err.message), 'error');
 						});
 					})
 					.catch(function(err) {
+						document.getElementById('storage-info').textContent = _('Error listing SMS');
 						ui.addNotification(null, E('p', _('Error listing SMS: ') + err.message), 'error');
 					});
 			}
