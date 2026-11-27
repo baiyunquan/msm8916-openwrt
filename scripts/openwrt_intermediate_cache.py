@@ -161,6 +161,15 @@ def prepare(openwrt_dir: Path) -> None:
         else:
             print("No saved HMUF02V5 cache state; preparing a fresh intermediate cache.")
 
+    # Some package host tools (notably luci-base's po2lmo/jsmin) compile in
+    # feeds/*/src rather than HOST_BUILD_DIR. A fresh checkout loses those
+    # binaries while restored .built stamps incorrectly skip Host/Compile.
+    # Rebuild package host tools as a coherent build/staging pair. Keep the
+    # target/kernel intermediates and the separate base toolchain/host cache.
+    shutil.rmtree(build_dir / "hostpkg", ignore_errors=True)
+    shutil.rmtree(openwrt_dir / "staging_dir/hostpkg", ignore_errors=True)
+    print("Reset package host tools for the fresh runner checkout.")
+
     normalize_source_mtimes(openwrt_dir)
 
 

@@ -515,6 +515,10 @@ The workflows keep at most one current entry in each of these three cache famili
    Before compiling HMUF, source file timestamps are normalized. OpenWrt's default package and
    kernel stamps include source mtimes, so this keeps unchanged cached build trees incremental across
    fresh runner checkouts.
+   Package host tools are rebuilt on each restored runner: some tools, such as
+   LuCI's `po2lmo`, put their binaries inside the uncached feeds checkout while
+   their build stamps live in `build_dir/hostpkg`. Both hostpkg build and staging
+   directories are reset together to avoid trusting incomplete restored tools.
 
 HMUF02V5 provides ccache whenever it is selected. If it is absent, the first selected board updates
 ccache and the downloads cache. Only a selected HMUF02V5 job updates its intermediate cache. PR,

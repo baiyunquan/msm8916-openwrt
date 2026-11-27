@@ -141,6 +141,25 @@ class OpenWrtCcacheConfigTests(unittest.TestCase):
             self.assertFalse(build_dir.exists())
             self.assertFalse(staging_dir.exists())
 
+    def test_matching_cache_rebuilds_hostpkg_tools_outside_cached_build_tree(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "openwrt"
+            self._git_repo(root, ".config", "CONFIG_TARGET=y\n")
+            state = root / openwrt_intermediate_cache.STATE_FILE
+            state.write_text(json.dumps(openwrt_intermediate_cache.cache_fingerprint(root)))
+            target_object = root / "build_dir/target-aarch64_generic_musl/kept.o"
+            stale_stamp = root / "build_dir/hostpkg/luci-base/.built"
+            staged_tool = root / "staging_dir/hostpkg/bin/po2lmo"
+            for path in (target_object, stale_stamp, staged_tool):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("cached")
+
+            openwrt_intermediate_cache.prepare(root)
+
+            self.assertTrue(target_object.exists())
+            self.assertFalse(stale_stamp.exists())
+            self.assertFalse(staged_tool.exists())
+
 
 class CachePruningTests(unittest.TestCase):
     def test_keeps_one_latest_cache_per_family_and_removes_legacy_caches(self):
