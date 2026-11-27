@@ -34,7 +34,7 @@ if [ -n "$mm" ]; then
 	modem_signal=$(printf '%s\n' "$mm" | awk '
 		/^modem[.]generic[.]signal-quality[.]value / { sub(/^[^:]*:[[:space:]]*/, ""); print; exit }')
 	modem_tech=$(printf '%s\n' "$mm" | awk '
-		/^modem[.]generic[.]access-technologies / { sub(/^[^:]*:[[:space:]]*/, ""); print; exit }')
+		/^modem[.]generic[.]access-technologies[.]value\[/ { sub(/^[^:]*:[[:space:]]*/, ""); print; exit }')
 fi
 [ -n "$modem_state" ] || modem_state=unknown
 [ -n "$modem_signal" ] || modem_signal=0
@@ -50,6 +50,7 @@ ims=unavailable
 if [ -e /dev/wwan0qmi0 ]; then
 	ims=$(timeout 8 qmicli -d qrtr://0 --imsa-get-ims-registration-status 2>/dev/null |
 		awk -F"'" '/Status:/ { print $2; exit }')
+	[ -n "$ims" ] || ims=$(timeout 20 /usr/sbin/ufi-ims-policy --status 2>/dev/null)
 	[ -n "$ims" ] || ims=unknown
 fi
 

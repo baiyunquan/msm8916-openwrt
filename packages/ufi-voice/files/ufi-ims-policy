@@ -1,0 +1,182 @@
+#!/usr/bin/env python3
+"""UFI103S runtime IMS policy; QMI responses must explicitly succeed.
+
+NAS voice-domain policy follows AirSimHub's bounded Unicom adaptation:
+POWER_CYCLE duration, only CS/PS preferred baselines, no calls in progress.
+No carrier firmware, calibration or SIM files are written here.
+"""
+import glob
+import os
+import re
+import struct
+import subprocess
+import sys
+import time
+
+DEV = '/dev/wwan0qmi0'
+OWNED = '/var/run/ufi-ims-ps-applied'
+
+
+def run(*args):
+    p = subprocess.run(args, text=True, capture_output=True, timeout=20)
+    if p.returncode:
+        raise RuntimeError('%s failed (%d)' % (args[0], p.returncode))
+    return p.stdout
+
+
+def decode(text):
+    fields = {}
+    for block in text.split('responseTLV:')[1:]:
+        kind = re.search(r'type\s*=.*?(0x[0-9a-fA-F]+)', block)
+        size = re.search(r'length\s*=\s*(\d+)', block)
+        value = re.search(r'value\s*=\s*([0-9A-Fa-f:]+)', block)
+        if not (kind and size and value):
+            continue
+        data = bytes.fromhex(value[1].replace(':', ''))
+        if len(data) != int(size[1]):
+            raise RuntimeError('truncated QMI TLV')
+        key = int(kind[1], 16)
+        if key in fields:
+            raise RuntimeError('duplicate QMI TLV')
+        fields[key] = data
+    result = fields.get(2)
+    if result != b'\0\0\0\0':
+        if result and len(result) == 4:
+            raise RuntimeError('QMI result=%d error=%d' % struct.unpack('<HH', result))
+        raise RuntimeError('missing QMI result')
+    return fields
+
+
+def qmi(service, message, *tlvs):
+    return decode(run('qmi-raw', DEV, hex(service), hex(message), *tlvs))
+
+
+def registration(fields):
+    # IMSA Get Registration is 0x20. Newer firmware returns the enum in TLV
+    # 0x12; DPM.1.0 returns only the legacy registered boolean in TLV 0x10.
+    value = fields.get(0x12)
+    if value is not None and len(value) == 4:
+        return {0: 'not-registered', 1: 'registering', 2: 'registered'}.get(
+            int.from_bytes(value, 'little'), 'unknown')
+    value = fields.get(0x10)
+    if value == b'\0':
+        return 'not-registered'
+    if value == b'\1':
+        return 'registered'
+    return 'unknown'
+
+
+def profile(index):
+    if not 1 <= index <= 255:
+        raise RuntimeError('invalid 3GPP profile index')
+    selector = '0x01=00%02x' % index
+    before = qmi(1, 0x2b, selector)
+    if before.get(0x14) != b'ims':
+        raise RuntimeError('refusing to modify a non-IMS APN')
+    if before.get(0x1f) == b'\x01' and before.get(0x22) == b'\x01':
+        return
+    qmi(1, 0x28, selector, '0x1f=01', '0x22=01')
+    after = qmi(1, 0x2b, selector)
+    if after.get(0x1f) != b'\x01' or after.get(0x22) != b'\x01':
+        raise RuntimeError('IMS profile flags failed read-back')
+    print('IMS profile %d: IMCN=1 PCSCF-via-PCO=1 verified' % index, flush=True)
+
+
+def kv(text):
+    return {key.strip(): value.strip() for key, value in
+            (line.split(':', 1) for line in text.splitlines() if ':' in line)}
+
+
+def ims_index(text):
+    index = None
+    for line in text.splitlines():
+        match = re.match(r'\s*\[(\d+)\]', line)
+        if match:
+            index = int(match[1])
+        if line.strip() == "APN: 'ims'":
+            return index
+    return None
+
+
+def sample():
+    if open('/tmp/sysinfo/board_name').read().strip() != 'thwc,ufi103s-v05':
+        return
+    # This firmware asserts a2_power.c:1189 when the AP releases the BAM vote.
+    # The matching DTS property pins it after first netdev_open in new kernels.
+    # Match that ordering: never force resume while boot handshake is pending.
+    for path in glob.glob('/sys/bus/platform/devices/*bam-dmux/power/control'):
+        status = os.path.join(os.path.dirname(path), 'runtime_status')
+        if open(status).read().strip() == 'active' and open(path).read().strip() != 'on':
+            with open(path, 'w') as f:
+                f.write('on\n')
+    if run('uci', '-q', 'get', 'ufivoice.main.volte').strip() != '1':
+        return
+    modem = kv(run('mmcli', '--timeout=5', '-m', 'any', '-K'))
+    sim = modem.get('modem.generic.sim', '')
+    if not re.fullmatch(r'/org/freedesktop/ModemManager1/SIM/\d+', sim):
+        return
+    home = kv(run('mmcli', '--timeout=5', '-i', sim, '-K')).get('sim.properties.operator-code')
+    if not home or not re.fullmatch(r'\d{5,6}', home):
+        return
+    unicom = home in ('46001', '46009')
+    if not unicom and not os.path.exists(OWNED):
+        return
+    if run('mmcli', '--timeout=5', '-m', 'any', '--voice-list-calls').strip() != 'No calls were found':
+        return
+    if unicom:
+        index = ims_index(run('qmicli', '-p', '-d', DEV, '--wds-get-profile-list=3gpp'))
+        if index is None:
+            raise RuntimeError('IMS profile is not ready')
+        # Also repairs after a transient setup failure or a missed hotplug event.
+        profile(index)
+    pref = qmi(3, 0x34).get(0x20)
+    if pref is None or len(pref) != 4:
+        raise RuntimeError('unsupported NAS voice-domain field')
+    current = int.from_bytes(pref, 'little')
+    desired = 3 if unicom else 2
+    if current == desired:
+        if not unicom and os.path.exists(OWNED):
+            os.remove(OWNED)
+        return
+    if current not in (2, 3):
+        return
+    qmi(3, 0x33, '0x17=00', '0x23=%s' % desired.to_bytes(4, 'little').hex())
+    # Record the acknowledged change before read-back: a timeout must not lose
+    # ownership of a successful 2->3 change that needs restoring on SIM change.
+    if unicom:
+        open(OWNED, 'w').close()
+    if qmi(3, 0x34).get(0x20) != desired.to_bytes(4, 'little'):
+        raise RuntimeError('NAS voice-domain read-back failed')
+    if not unicom and os.path.exists(OWNED):
+        os.remove(OWNED)
+    print('runtime voice domain=%d verified' % desired, flush=True)
+
+
+def main():
+    if len(sys.argv) == 3 and sys.argv[1] == '--profile':
+        profile(int(sys.argv[2]))
+    elif sys.argv[1:] == ['--watch']:
+        last = None
+        while True:
+            try:
+                sample()
+                last = None
+            except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired) as e:
+                if str(e) != last:
+                    print(str(e), file=sys.stderr, flush=True)
+                    last = str(e)
+            time.sleep(15)
+    elif sys.argv[1:] == ['--once']:
+        sample()
+    elif sys.argv[1:] == ['--status']:
+        print(registration(qmi(0x21, 0x20)))
+    else:
+        raise RuntimeError('use --profile INDEX | --once | --watch | --status')
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired) as e:
+        print(str(e), file=sys.stderr)
+        sys.exit(1)

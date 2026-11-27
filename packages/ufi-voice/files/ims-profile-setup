@@ -40,20 +40,16 @@ if [ "$(cat /tmp/sysinfo/board_name 2>/dev/null)" = "thwc,ufi103s-v05" ]; then
 	fi
 fi
 
-# procd restarts an instance that exits, even cleanly, so this script must be
-# idempotent: if an "ims" profile is already there, there is nothing to do.
-if qmicli -d "$DEV" --device-open-proxy --wds-get-profile-list=3gpp 2>/dev/null |
-	grep -q "APN: 'ims'"; then
-	log "ims profile already present, nothing to do"
-	touch "$READY"
-	exit 0
-fi
+# Existing profiles may lose IMCN/PCO flags after a modem reset. Always check
+# those flags, including on the existing-profile path.
+idx=$(qmicli -d "$DEV" --device-open-proxy --wds-get-profile-list=3gpp 2>/dev/null |
+	awk '/^[[:space:]]*\[[0-9]+\]/ { idx=$1; gsub(/[][]/, "", idx) }
+	     /APN: '\''ims'\''/ { print idx; exit }')
 
 # The QMI service can NAK the first few requests while the modem finishes
 # booting, so retry until it answers.
-idx=""
 j=0
-while [ $j -lt 100 ]; do
+while [ -z "$idx" ] && [ $j -lt 100 ]; do
 	idx=$(qmicli -d "$DEV" --device-open-proxy \
 		--wds-create-profile=3gpp,apn=ims,pdp-type=IPV4V6 2>/dev/null |
 		sed -n "s/.*Profile index: '\([0-9][0-9]*\)'.*/\1/p")
@@ -68,10 +64,12 @@ if [ -z "$idx" ]; then
 	exit 1
 fi
 
-# TLV 0x01 is {u8 profile type, u8 profile index}; type 0 is 3GPP.
-hexidx=$(printf '%02x%02x' 0 "$idx")
-qmi-raw "$DEV" 1 0x0028 0x01="$hexidx" 0x1f=01 0x22=01 >/dev/null 2>&1
+if ! /usr/sbin/ufi-ims-policy --profile "$idx"; then
+	log "ims profile $idx: could not verify IMCN/PCO flags"
+	touch "$READY"
+	exit 1
+fi
 
-log "ims profile $idx created, IMCN and PCSCF-via-PCO set"
+log "ims profile $idx ready, IMCN and PCSCF-via-PCO verified"
 touch "$READY"
 exit 0

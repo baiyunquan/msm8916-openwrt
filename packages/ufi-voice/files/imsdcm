@@ -51,7 +51,16 @@ def ims_registered():
                            capture_output=True, text=True, timeout=15)
     except subprocess.TimeoutExpired:      # the modem is restarting
         return False
-    return "Status: 'registered'" in r.stdout
+    if "Status: 'registered'" in r.stdout:
+        return True
+    if "Status:" in r.stdout:
+        return False
+    try:
+        r = subprocess.run(['/usr/sbin/ufi-ims-policy', '--status'],
+                           capture_output=True, text=True, timeout=20)
+        return r.returncode == 0 and r.stdout.strip() == 'registered'
+    except (OSError, subprocess.TimeoutExpired):
+        return False
 
 def modem_path():
     _, out = mm('-L')

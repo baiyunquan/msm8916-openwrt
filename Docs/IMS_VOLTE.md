@@ -266,3 +266,58 @@ recoverable backup before making device-local changes.
 - This repo: `packages/ufi-voice` (`imsdcm`, `volte-setup`, `10-report-down`),
   `packages/diag-logtool`, `msm89xx/patches/873`–`875`,
   [UFI003_VOICE.md](UFI003_VOICE.md), [UFI003_MB_V02.md](UFI003_MB_V02.md)
+
+## UFI103S v05 bring-up record (2026-11-27)
+
+This board's preserved baseband is `MPSS.DPM.1.0.C7-00193`
+(`UFI103_CT 20220801`), not the DPM.2.0.2 baseband used in the UFI003 recipe.
+The linked AirSimHub `docs/UNICOM-VOICE.md` records a different UFI003 baseband
+and its own verified Gen_3GPP profile. Its private modem shadow profile is not
+part of the public source and must not be copied between devices.
+
+Confirmed on this UFI103S:
+
+- LTE data works; NAS reports IMS voice support from the network.
+- `IMS_enable=01` and `ims_hybrid_enable=01` persist and expose IMS QMI services.
+- Existing `ims` APN entries lose their IMCN/PCO flags on modem restart. The
+  setup now checks, repairs and verifies them even when the APN already exists.
+- The new UFI103S-only policy follows AirSimHub's Unicom runtime NAS preference
+  (46001/46009, PS preferred, POWER_CYCLE, no active calls). It retries after
+  ModemManager becomes ready and after modem SSR.
+- Repeated `a2_power.c:1189` crashes occurred with BAM autosuspend. Keeping its
+  power vote on stopped that crash during the observed run. The board DTS now
+  uses the driver's deferred `qcom,a2-pin` mechanism. The runtime fallback only
+  pins an already-active device, after its power handshake.
+- IMSA **registration** query is service 0x21/message **0x20**. Message **0x21**
+  queries services. Some older SOP examples reversed them. DPM.1.0 returns
+  registration as the legacy one-byte TLV 0x10 boolean, which current qmicli
+  doesn't display; `ufi-ims-policy --status` supports it and modern TLV 0x12.
+
+IMS is still **not registered**, and Voice service is **unavailable**.
+The legacy IMS settings getters for registration manager (0x26), QIPCALL
+(0x37), and extended registration (0x45) return QMI error 54 with settings
+cause 3 (`READ_FAILED`); relevant IMS EFS configuration is absent. Modern
+0x8f/0x90 services-enabled settings are rejected with QMI error 58.
+
+A trial of the shipped 24772-byte Gen_3GPP MCFG uploaded successfully but
+stayed Pending after activation, with no missing IMS configuration populated.
+It was deactivated and deleted. Temporary auto-selection/operation-mode and
+QIPCALL configuration experiments were also removed, with EFS sync accepted;
+none established IMS registration. No radio calibration or firmware partition
+was changed. A matching, validated IMS configuration/baseband is still needed;
+these startup repairs alone are not a VoLTE success claim.
+
+Protocol references: [libqmi IMSA message definitions](https://github.com/linux-mobile-broadband/libqmi/blob/main/data/qmi-service-imsa.json)
+and [Qualcomm IMS settings definitions](https://github.com/bcyj/android_tools_leeco_msm8996/blob/f242858a8cbb2c9ad9b5b2e53d75380ae775727a/qmi/services/ip_multimedia_subsystem_settings_v01.h).
+
+### Downloaded stock package inspected
+
+`ufi103s_v05_stock.zip` was supplied afterwards. It is a downloaded same-model
+factory image, not this unit's private backup. Its modem.b18 SHA-256 is
+`6af34188cd0518bce52e62a4968965a188c73e9346b42de33c23c17c0607adbb`, identical
+to the firmware already running. Read-only inspection of system and userdata
+found the vendor's 12 modem test/selection MBNs (`ct`, CMCC, CTA, GCF), but none
+contains IMS EFS configuration. There is no Gen_3GPP/IMS profile in its modem
+FAT partition. Its modemst/fsg/persist data was not applied to this unit.
+The archive therefore provides provenance for the current baseband, but no
+validated missing IMS configuration or newer VoLTE baseband.
