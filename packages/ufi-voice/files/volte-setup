@@ -1,6 +1,7 @@
 #!/bin/sh
-# volte-setup - modem EFS settings for VoLTE on the UFI003 (DPM.2.0.2 modem
-# with the ROW Gen_3GPP MCFG active).
+# volte-setup - modem EFS settings for IMS/VoLTE when the active modem profile
+# provides the matching IMS configuration. Used on UFI003 and by the
+# UFI103S-specific IMS profile setup.
 #
 #   volte-setup status            show the IMS items and the IMS state
 #   volte-setup apply-ims-flags   persist only the two IMS enable flags
@@ -87,6 +88,10 @@ status() {
 
 apply() {
 	changed=0
+	if ! flock "$LOCK" diag_efs detect >/dev/null 2>&1; then
+		echo "DIAG EFS is unavailable" >&2
+		return 1
+	fi
 	[ "$(efs_hex $IMS/IMS_enable)" = "01" ] || {
 		put_hex "$IMS/IMS_enable" 01 || return 1
 		changed=1

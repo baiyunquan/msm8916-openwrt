@@ -36,8 +36,8 @@ RES_OK = tlv(0x02, struct.pack('<HH', 0, 0))
 def res_err(code):
     return tlv(0x02, struct.pack('<HH', 1, code))
 
-def mm(*args):
-    r = subprocess.run(['mmcli'] + list(args), capture_output=True, text=True)
+def mm(*args, timeout=None):
+    r = subprocess.run(['mmcli'] + list(args), capture_output=True, text=True, timeout=timeout)
     return r.returncode, r.stdout + r.stderr
 
 def uci(opt, default=''):
@@ -62,12 +62,19 @@ def ims_registered():
     except (OSError, subprocess.TimeoutExpired):
         return False
 
-def modem_path():
-    _, out = mm('-L')
+def modem_path(timeout=None):
+    _, out = mm('-L', timeout=timeout)
     return next((w for w in out.split() if '/Modem/' in w), None)
 
-def bearer_kv(path):
-    _, out = mm('-b', path, '-K')
+def is_ufi103():
+    try:
+        with open('/tmp/sysinfo/board_name') as f:
+            return f.read().strip() == 'thwc,ufi103s-v05'
+    except OSError:
+        return False
+
+def bearer_kv(path, timeout=None):
+    _, out = mm('-b', path, '-K', timeout=timeout)
     kv = {}
     for line in out.splitlines():
         if ':' in line:
@@ -81,26 +88,75 @@ class Server:
         self.sock.bind((self.sock.getsockname()[0], 0))
         self.node, self.port = self.sock.getsockname()
         self.clients = set()
-        self.bearers = {}       # apn -> bearer path
-        self.conns = []         # local id -> (apn, family, orig_conn, sub)
+        self.bearers = {}       # (apn, 3gpp profile) -> bearer path
+        # PDP ID zero means activation failure, not a usable interface.
+        self.conns = [None] * 256  # PDP id -> (bearer key, family, orig_conn, sub)
         self.ind_txn = 1
         self.lock = threading.Lock()
         self.idle_since = time.monotonic()  # no connection and not registered
         self.modem = None       # ModemManager object the bearers belong to
         self.activation_lock = threading.Lock()
 
-    def wait_attached(self):
-        deadline = time.monotonic() + 15
+    def wait_attached(self, timeout=15):
+        deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            path = modem_path()
-            if path:
-                _, out = mm('-m', path, '-K')
-                if any(l.partition(':')[2].strip() == 'attached'
-                       for l in out.splitlines()
-                       if l.startswith('modem.3gpp.packet-service-state ')):
-                    return path
-            time.sleep(0.5)
+            try:
+                budget = min(5, max(0.1, deadline - time.monotonic()))
+                path = modem_path(timeout=budget)
+                if path:
+                    budget = min(5, max(0.1, deadline - time.monotonic()))
+                    _, out = mm('-m', path, '-K', timeout=budget)
+                    if any(l.partition(':')[2].strip() == 'attached'
+                           for l in out.splitlines()
+                           if l.startswith('modem.3gpp.packet-service-state ')):
+                        return path
+            except subprocess.TimeoutExpired:
+                pass
+            remaining = deadline - time.monotonic()
+            if remaining > 0:
+                time.sleep(min(0.5, remaining))
         return None
+
+    def primary_data_ready(self, deadline=None):
+        if deadline is None:
+            deadline = time.monotonic() + 5
+        def budget():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired('mmcli', 0)
+            return min(5, remaining)
+        try:
+            return self._primary_data_ready(budget)
+        except subprocess.TimeoutExpired:
+            return False
+
+    def _primary_data_ready(self, budget):
+        _, out = mm('-m', 'any', '-K', timeout=budget())
+        for line in out.splitlines():
+            if not line.startswith('modem.generic.bearers.value'):
+                continue
+            kv = bearer_kv(line.split(':', 1)[1].strip(), timeout=budget())
+            if (kv.get('bearer.status.connected') == 'yes'
+                    and kv.get('bearer.properties.apn', '--').lower() not in ('', '--', 'ims')
+                    and kv.get('bearer.status.interface') == 'wwan0'):
+                return True
+        return False
+
+    def wait_primary_data(self, timeout):
+        deadline = time.monotonic() + timeout
+        ready_since = None
+        while time.monotonic() < deadline:
+            if self.primary_data_ready(deadline=deadline):
+                if ready_since is None:
+                    ready_since = time.monotonic()
+                if time.monotonic() - ready_since >= 5:
+                    return True
+            else:
+                ready_since = None
+            remaining = deadline - time.monotonic()
+            if remaining > 0:
+                time.sleep(min(1, remaining))
+        return False
 
     def report_stale(self, addr):
         # Connections a previous instance reported as up: tell the modem they
@@ -199,8 +255,11 @@ class Server:
         self.save_state()
 
     def run(self):
-        # Hybrid IMS sends its activation request as soon as its LTE PDN
-        # connects. Publish before attach so the modem can reach us then.
+        # Publish immediately. UFI103S DPM.1.0 sends only one IMS PDN request
+        # during attach; waiting for ModemManager or the Internet bearer here
+        # loses that request and it does not retry until the modem is cycled.
+        # start_connection waits for the modem and, on UFI103S, for netifd's
+        # primary bearer before creating IMS so Internet stays on wwan0.
         self.publish()
         self.idle_since = time.monotonic()
         next_check = time.monotonic() + 30
@@ -243,42 +302,57 @@ class Server:
         spec = body.get(0x01, b'')
         n = spec[0] if spec else 0
         apn = spec[1:1 + n].decode(errors='replace')
-        unk, sel, fam, p3gpp, p3gpp2 = struct.unpack_from('<IIIHH', spec, 1 + n)
+        apn_type, rat, fam, wds_profile = struct.unpack_from('<IIII', spec, 1 + n)
         conn = struct.unpack('<I', body[0x10])[0] if 0x10 in body else 0
         sub = struct.unpack('<I', body[0x13])[0] if 0x13 in body else 0
-        log('start_connection apn=%r unk=%d profiles=%d family=%s profile3gpp=%d profile3gpp2=%d conn=%d sub=%d'
-            % (apn, unk, sel, {0: 'ipv4', 1: 'ipv6'}.get(fam, fam), p3gpp, p3gpp2, conn, sub))
+        log('start_connection apn=%r apn_type=%d rat=%d family=%s wds_profile=%d conn=%d sub=%d'
+            % (apn, apn_type, rat, {0: 'ipv4', 1: 'ipv6'}.get(fam, fam), wds_profile, conn, sub))
         with self.activation_lock:
             if self.modem is None:
-                self.modem = self.wait_attached()
+                self.modem = self.wait_attached(timeout=60)
                 if self.modem is None:
                     log('modem did not attach in time for IMS activation')
                     self.send(addr, qmi(2, txn, 0x20, res_err(1)))
                     return
                 self.drop_old_bearers()
-            self.activate_bearer(addr, txn, apn, fam, conn, sub)
+            if is_ufi103() and not self.wait_primary_data(timeout=30):
+                # Voice-only operation is still useful when mobile data is
+                # disabled. Do not hold the modem's DCM request indefinitely.
+                log('primary data did not become ready; continuing for IMS voice')
+            # APN alone does not carry the IMS profile's IMCN/PCO flags.
+            # In particular, DPM.1.0 requests a specific 3GPP WDS profile
+            # so the modem can discover its P-CSCF through that session.
+            profile = wds_profile if rat in (1, 2) and 1 <= wds_profile <= 255 else None
+            self.activate_bearer(addr, txn, apn, fam, conn, sub, profile)
 
-    def activate_bearer(self, addr, txn, apn, fam, conn, sub):
-        path = self.bearers.get(apn)
+    def activate_bearer(self, addr, txn, apn, fam, conn, sub, profile=None):
+        local = next((i for i in range(1, 256) if self.conns[i] is None), None)
+        if local is None:
+            self.send(addr, qmi(2, txn, 0x20, res_err(5)))
+            return
+        key = (apn, profile)
+        path = self.bearers.get(key)
         if path is None:
-            rc, out = mm('-m', 'any', '--create-bearer=apn=%s,ip-type=ipv4v6' % apn)
+            config = 'apn=%s,ip-type=ipv4v6' % apn
+            if profile is not None:
+                config += ',profile-id=%d' % profile
+            rc, out = mm('-m', 'any', '--create-bearer=' + config)
             log('create-bearer rc=%d %s' % (rc, out.strip()))
             path = next((w for w in out.split() if '/Bearer/' in w), None)
             if path is None:
                 self.send(addr, qmi(2, txn, 0x20, res_err(1)))
                 return
-            self.bearers[apn] = path
+            self.bearers[key] = path
         rc, out = mm('-b', path, '--connect')
         log('connect rc=%d %s' % (rc, out.strip()))
         if rc != 0:
             # The bearer may be gone with the modem (SSR); create a new one
             # on the next request.
-            self.bearers.pop(apn, None)
+            self.bearers.pop(key, None)
             mm('-m', 'any', '--delete-bearer=%s' % path)
             self.send(addr, qmi(2, txn, 0x20, res_err(1)))
             return
-        local = len(self.conns)
-        self.conns.append((apn, fam, conn, sub))
+        self.conns[local] = (key, fam, conn, sub)
         self.send(addr, qmi(2, txn, 0x20, RES_OK + tlv(0x10, struct.pack('<B', local))
                             + tlv(0x11, struct.pack('<I', conn)) + tlv(0x12, struct.pack('<I', sub))))
         self.save_state()
@@ -312,7 +386,7 @@ class Server:
             if path:
                 log('disconnect %s' % mm('-b', path, '--disconnect')[1].strip())
                 mm('-m', 'any', '--delete-bearer=%s' % path)
-        self.send(addr, qmi(2, txn, 0x21, RES_OK + tlv(0x10, b'\xfa') + tlv(0x11, struct.pack('<I', echo))))
+        self.send(addr, qmi(2, txn, 0x21, RES_OK + tlv(0x10, bytes([local])) + tlv(0x11, struct.pack('<I', echo))))
         # Like 81voltd: report the connection as down (no address, error 13),
         # otherwise the modem never asks for the PDN again.
         if known:

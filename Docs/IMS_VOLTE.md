@@ -7,7 +7,7 @@ November 2026). Two boards were worked on:
 | Board | Modem build | RF | Result |
 | --- | --- | --- | --- |
 | UFI003 MB V02 | `MPSS.DPM.2.0.2.c1-00178` | WTR4905 | **Works**: IMS registered, MO/MT VoLTE calls, call waiting, audio to a BT headset and SIP phones |
-| a compatible modem profile (HiMI) | `MPSS.DPM.1.0.c7-00193` | WTR1605 | **Not working**: IMS stack present, never asks for the IMS PDN |
+| UFI103S v05 | `MPSS.DPM.1.0.C7-00193` | WTR1605 | **IMS registered; Voice service available; outgoing call reached active** after a device-local IMS EFS port. Audio and the exact SIP/RAT path during the call remain unverified. |
 
 The rest of the call stack (audio, Bluetooth, Asterisk) is in
 [UFI003_VOICE.md](UFI003_VOICE.md); the watchdog interplay is in
@@ -20,13 +20,14 @@ Short version:
   IPsec). Linux never sees SIP or RTP. Linux has to: enable IMS in the modem
   EFS, give the modem an `ims` PDN when it asks for one (hybrid mode), and
   open the DSP's VoLTE voice session for audio.
-- VoLTE needs a modem whose **MCFG carrier configuration has the IMS
-  items**. On a DPM.2.0.2 modem (UFI003) the `a compatible modem profile` MCFG from the modem
-  partition has them; five EFS items on top are enough.
-- On a DPM.1.0 modem (a compatible modem profile and other WTR1605 sticks) there is no
-  matching IMS configuration; donor MBNs from DPM.2.0.2 crash it. Treat
-  DPM.1.0 sticks as "no VoLTE" until someone finds what gates the PDN
-  request.
+- IMS settings are modem-generation and carrier dependent. Do not activate a
+  donor MBN across modem generations. On this UFI103S v05, an IMS-only subset
+  of EFS files from the supplied UFI003 CMCC profile was accepted by the
+  preserved DPM.1.0 baseband; the complete MBN was not activated.
+- That device-local port now registers on China Unicom, exposes IMS Voice, and
+  has completed an outgoing call to `active`. This evidence applies to this
+  UFI103S, modem build and SIM; it does not establish compatibility for other
+  DPM.1.0 sticks or carriers.
 
 ## 1. Architecture
 
@@ -93,11 +94,12 @@ volte-setup status            # MCFG, the items, IMS registration, SMS/voice ser
 volte-setup apply --restart   # write what differs, sync the EFS, restart the modem
 ```
 
-On **UFI103S v05**, `ims-profile-setup` also checks and persists only the two
-confirmed enable bytes (`IMS_enable=01` and `ims_hybrid_enable=01`) during modem
-startup/restart. This is board-gated; the other UFI voice boards keep their
-existing EFS profile. The `ufi-voice` package includes `qmi-raw`, which the IMS
-profile setup uses to set the WDS IMCN and PCSCF-via-PCO flags.
+On **UFI103S v05**, `ims-profile-setup` checks and persists the two IMS enable
+bytes. It does not overwrite `voice_domain_pref`, which is carrier- and
+user-specific; that preference must be applied per device. Other UFI voice
+boards keep their existing EFS profile. The `ufi-voice` package includes
+`qmi-raw`, which the IMS profile setup uses to set the WDS IMCN and
+PCSCF-via-PCO flags.
 
 How it works, in case it has to be done by hand:
 
@@ -119,7 +121,38 @@ How it works, in case it has to be done by hand:
   is missing or has another size, the right MCFG is not active; do not
   write one from scratch.
 
-### 2.3 Verify
+### 2.3 UFI103S v05 IMS-only profile port
+
+The target's preserved baseband is `MPSS.DPM.1.0.C7-00193`
+(`UFI103_CT 20220801`). The supplied UFI003 package's
+`Commercial-CSFB-SS-CMCC.mbn` contains 40 IMS EFS records. The target's own
+`conf/ims.conf` supports 38 of those paths; two unsupported QIPCALL records
+were excluded. The source MBN SHA-256 is
+`b43791bc25518c8495ec5731318801a6fbd02fd19c562e816433d51b10c89201`.
+
+The port wrote only those supported IMS EFS records (6,819 bytes). The two
+enable flags already matched `01`; the other 36 files were absent. No MBN,
+whole EFS image, `modemst`, `fsg`, firmware, RF calibration or device identity
+was copied. EFS writes were read back and synced. The device-local rollback
+journal is under `/root/ufi103-ims-port/`.
+
+The port also required `/nv/item_files/modem/mmode/voice_domain_pref=03` as an
+exact one-byte PS-preferred setting. That item was absent before the change;
+`volte-setup apply` wrote it and the modem accepted the EFS sync. The value
+persists in this device's EFS; the generic boot hook does not force it on
+other SIMs or users.
+
+On 2026-11-27, after a modem restart, QMI service 770 was published before the
+modem attached. It received the IMS request for WDS profile 3, created an IPv6
+IMS bearer on `wwan1`, and the IMS registration reader reported `registered`;
+QMI IMS Voice was `available`. The separate `3gnet` bearer remained on
+`wwan0`, and an IPv4 ping through `wwan0` succeeded. An outgoing call reached
+`active` and was hung up cleanly. SIP packets and call-time RAT were not
+captured, and no audio endpoint was connected, so audio and independent proof
+of the SIP signaling path remain unverified. A full AP cold-boot cycle has not
+yet been repeated with the final startup ordering.
+
+### 2.4 Verify
 
 ```sh
 qmicli -d qrtr://0 --imsa-get-ims-registration-status   # Status: 'registered'
@@ -129,8 +162,9 @@ logread -e imsdcm                                       # start/stop requests, a
 ```
 
 Registered with only the SMS service available means `voice_domain_pref` is
-wrong (§2.2). Registered and voice available, but calls still go out on 3G,
-means the audio/session side picked CS (§5).
+wrong (§2.2). If IMS Voice is available but a call still falls back to CS,
+check the modem's voice-domain/network behavior; `ufivoice.main.session`
+selects the DSP audio session and does not select the network call domain (§5).
 
 Use `qmicli` on `qrtr://0` sparingly from scripts: every call takes a QMI
 client id. A polling loop has exhausted client ids before
@@ -147,30 +181,30 @@ client id. A polling loop has exhausted client ids before
 
 | Message | Direction | What we do |
 | --- | --- | --- |
-| 0x20 start connection (APN, IP family) | modem → AP | `mmcli --create-bearer apn=ims,ip-type=ipv4v6` + connect. Response TLVs 0x10 (local handle, u8), 0x11 (connection handle), 0x12 (subscription). Then indication 0x20 with the address in TLV 0x11 `{u32 family, u8 len, string}` |
+| 0x20 start connection (APN, IP family, WDS profile) | modem → AP | `mmcli --create-bearer apn=ims,ip-type=ipv4v6,profile-id=<requested>` + connect. Response TLVs 0x10 (PDP ID, u8), 0x11 (connection handle), 0x12 (subscription). Then indication 0x20 with the address in TLV 0x11 `{u32 family, u8 len, string}` |
 | connection down | AP → modem | indication 0x20 with result error 13 and no address |
-| 0x21 stop connection | modem → AP | response TLV 0x10 = 0xfa, TLV 0x11 echoes the handle; tear the bearer down, then **report it down**: without the down indication the modem never asks again |
+| 0x21 stop connection | modem → AP | response TLV 0x10 echoes the allocated PDP ID, TLV 0x11 echoes the handle; tear the bearer down, then **report it down**: without the down indication the modem never asks again |
 | 0x23 and the rest | modem → AP | plain success, no action |
 
-- The modem's stop request carries a handle (`local=1`) that **does not
-  match** the handle the AP returned. Do not map it to the active connection
-  by handle.
+- The AP reserves PDP ID zero for failure and allocates IDs 1 through 255.
+  Stop requests are matched by the returned PDP ID; responses echo that ID.
 - The P-CSCF address comes to the modem in the network's PCO; the AP does
   not have to pass it.
 
 ### 3.2 Start-up order
 
-The order is what made the UFI003 register reliably:
+`imsdcm` publishes service 770 immediately. This matters on UFI103S v05:
+the DPM.1.0 IMS client sends one Start Connection request during attach and
+does not retry if service 770 is absent. For a new UFI103S request, the
+handler waits up to 60 seconds for ModemManager attachment, deletes leftover
+IMS bearers, and waits up to 30 seconds for the primary non-IMS bearer on
+`wwan0` to remain ready for five seconds. It then creates the IMS bearer using
+the WDS profile ID requested by the modem. If no primary bearer appears, it
+continues for voice-only use. This preserves `wwan0` for Internet and keeps
+IMS on `wwan1` when both PDNs are active.
 
-1. **Wait for LTE (PS) attach.** If the service is published before the
-   attach, the modem only sends 0x23 and never 0x20.
-2. **Wait for the WAN interface** (`ufivoice.main.wan_iface`, default
-   `modem`) to be up, plus 10 s. At boot `qcom-carrier-autocfg` deletes every
-   bearer while the WAN comes up; an IMS bearer made before that vanishes
-   under the modem, which then stops asking.
-3. Wait for the attach again.
-4. Delete leftover `ims` bearers.
-5. Publish service 770.
+Other boards also publish immediately; their request handling does not wait
+for the UFI103S-specific primary-data condition.
 
 ### 3.3 Keeping it alive
 
@@ -179,9 +213,9 @@ The order is what made the UFI003 register reliably:
 - A watchdog every 15 s:
   - a bearer that disappeared is reported down at once;
   - **a ModemManager modem path change** (modem restart/SSR) makes `imsdcm`
-    exit; procd starts a fresh instance that goes through §3.2. After an SSR
-    the modem asks for the PDN while ModemManager has no modem yet, gets an
-    error and stops asking, so a restart of the service is needed;
+    exit; procd starts a fresh instance that immediately republishes service
+    770 (§3.2). The request handler waits for ModemManager to finish probing
+    before it creates the IMS bearer;
   - idle (no connection and IMS not registered) for `ims_kick_after` seconds
     (180) → exit and restart. The limit doubles each time it does not help
     (`/tmp/imsdcm.kick`, up to 3600 s), e.g. on a network without VoLTE.
@@ -202,9 +236,9 @@ The order is what made the UFI003 register reliably:
 - OpenWrt's dispatcher `/usr/lib/ModemManager/connection.d/10-report-down`
   restarts the WAN interface on **any** bearer disconnect. Restarting the
   interface disconnects every bearer, IMS included, which disconnects again:
-  a reconnect loop. `ufi-voice` installs an override in
-  `/etc/ModemManager/connection.d/10-report-down` that ignores the `ims`
-  bearer and bearers of other interfaces.
+  a reconnect loop. `ufi-voice` keeps the `/etc` hook, and the package overlay
+  replaces the packaged `/usr/lib` hook; both ignore the `ims` bearer and
+  bearers of other interfaces.
 - The `ims` bearer is not a netifd interface; nothing routes over it on the
   Linux side. The modem carries SIP/RTP itself.
 - The internet bearer (netifd `modem`) and the `ims` bearer are separate
@@ -293,7 +327,8 @@ Confirmed on this UFI103S:
   registration as the legacy one-byte TLV 0x10 boolean, which current qmicli
   doesn't display; `ufi-ims-policy --status` supports it and modern TLV 0x12.
 
-IMS is still **not registered**, and Voice service is **unavailable**.
+Before the IMS-only profile port below, IMS was **not registered** and Voice
+service was **unavailable**.
 The legacy IMS settings getters for registration manager (0x26), QIPCALL
 (0x37), and extended registration (0x45) return QMI error 54 with settings
 cause 3 (`READ_FAILED`); relevant IMS EFS configuration is absent. Modern
@@ -302,10 +337,11 @@ cause 3 (`READ_FAILED`); relevant IMS EFS configuration is absent. Modern
 A trial of the shipped 24772-byte Gen_3GPP MCFG uploaded successfully but
 stayed Pending after activation, with no missing IMS configuration populated.
 It was deactivated and deleted. Temporary auto-selection/operation-mode and
-QIPCALL configuration experiments were also removed, with EFS sync accepted;
-none established IMS registration. No radio calibration or firmware partition
-was changed. A matching, validated IMS configuration/baseband is still needed;
-these startup repairs alone are not a VoLTE success claim.
+QIPCALL configuration experiments were also removed, with EFS sync accepted.
+Those experiments did not establish registration; the later successful path
+used an IMS-only EFS subset from the supplied UFI003 package and did not
+activate that donor MCFG. No radio calibration or firmware partition was
+changed.
 
 Protocol references: [libqmi IMSA message definitions](https://github.com/linux-mobile-broadband/libqmi/blob/main/data/qmi-service-imsa.json)
 and [Qualcomm IMS settings definitions](https://github.com/bcyj/android_tools_leeco_msm8996/blob/f242858a8cbb2c9ad9b5b2e53d75380ae775727a/qmi/services/ip_multimedia_subsystem_settings_v01.h).
@@ -321,3 +357,73 @@ contains IMS EFS configuration. There is no Gen_3GPP/IMS profile in its modem
 FAT partition. Its modemst/fsg/persist data was not applied to this unit.
 The archive therefore provides provenance for the current baseband, but no
 validated missing IMS configuration or newer VoLTE baseband.
+
+
+### IMS-only profile port from the supplied UFI003 NV package
+
+The supplied `bin/fsg.bin` contains a gzip-compressed tar at offset `0x228`,
+with six standalone MCFGs under `/nvm/mcfg/cfg_01`. Their names alone are not
+proof of IMS support: the CU (Unicom), CT and ROW files in that particular
+package carry no IMS EFS records. `Commercial-CSFB-SS-CMCC` has 40 IMS file
+records; Reliance/Jio has 47 and is a different carrier configuration.
+
+For this UFI103S's preserved DPM.1.0 baseband, only the CMCC MCFG's IMS file
+records were extracted. Its SHA-256 is
+`b43791bc25518c8495ec5731318801a6fbd02fd19c562e816433d51b10c89201`.
+The extracted files were intersected with the target's own `conf/ims.conf`:
+`qipcall_dtx_enabled` and `qipcall_qos_config` were excluded as unsupported.
+`IMS_enable` was overridden to `01`; `ims_hybrid_enable=01`, operation mode
+`02` and the `ims` APN were retained. This is an IMS-only adaptation of those
+configuration records, not activation of the complete CMCC carrier MCFG.
+
+The resulting local bundle has 38 files, 6,819 bytes. The two enable flags
+already matched, so 36 absent IMS files were written. Every write was read
+back and matched before EFS sync and restart. A per-file rollback journal
+records both originally absent files and existing preimages. The device's
+firmware, RF calibration, SIM identity, modemst/fsg partition images and
+carrier selection were not replaced with data from another device.
+
+After the port, legacy IMS settings Get Registration Manager (0x26) and
+Get QIPCALL (0x37) succeed, with VoLTE enabled, instead of READ_FAILED. An IMS
+IPv6 PDN can be established, and China Unicom IMS registration plus Voice
+service availability were observed. The previously absent one-byte
+`voice_domain_pref=03` was then written and its EFS sync accepted.
+
+An early modem-restart attempt exposed a service-start race: `imsdcm` waited
+for ModemManager and the Internet bearer before publishing service 770, so the
+baseband's one-time request arrived too early. The service now publishes
+immediately, waits for attachment and `wwan0` data inside the request handler,
+then creates the IMS bearer on `wwan1`. A live modem restart with this ordering
+was successful: the IMS request arrived after publication, registration
+returned, and Voice service was available. The Internet bearer remained on
+`wwan0` and passed a two-packet IPv4 ping. A new outgoing call reached active
+and was hung up cleanly. SIP packets and call-time RAT were not captured, and
+audio was not verified because no audio endpoint was connected. A full AP
+cold-boot cycle has not yet been repeated with the final startup ordering.
+
+The AP connection service also needed protocol corrections:
+
+- Preserve the requested LTE/EPC WDS profile number in the ModemManager
+  bearer, rather than supplying only `apn=ims`. Otherwise the profile's
+  IMCN and P-CSCF-via-PCO settings are lost. Bearers are keyed by APN and
+  profile so a request cannot silently reuse another profile's session.
+- Allocate and reuse PDP IDs 1 through 255; zero indicates activation
+  failure. Return an error when all IDs are occupied. Deactivation responses
+  echo the actual PDP ID, rather than the old fixed `0xfa` value.
+- On UFI103S, publish service 770 before ModemManager attach so the baseband's
+  one-time request is not lost. The request handler waits up to 60 seconds
+  for attach, clears an old IMS bearer, and allows the non-IMS bearer on
+  `wwan0` to settle for five seconds (up to 30 seconds total) before creating
+  IMS. Giving IMS `wwan0` first left the Internet bearer on `wwan1` without
+  traffic; with Internet first, both bearers stayed active and `wwan0` passed
+  traffic. The bounded wait still allows voice-only use when there is no
+  Internet bearer.
+- Patch the packaged `/usr/lib/ModemManager/connection.d/10-report-down`
+  as well as the `/etc` hook. ModemManager executes hooks from both
+  directories; a same-named `/etc` file does not replace the packaged hook.
+  Updating only `ufi-voice` on an old image will not update that `/usr/lib`
+  hook; a rebuilt modemmanager package or full image is required.
+
+Protocol evidence: [Qualcomm IMSDCM definitions](https://github.com/bcyj/android_tools_leeco_msm8996/blob/master/qmi/services/ip_multimedia_subsystem_dcm_v01.h),
+[libqmi IMSDCM layout](https://github.com/linux-mobile-broadband/libqmi/blob/main/data/qmi-service-imsdcm.json),
+and [ModemManager dispatcher implementation](https://github.com/linux-mobile-broadband/ModemManager/blob/main/src/mm-dispatcher-connection.c).

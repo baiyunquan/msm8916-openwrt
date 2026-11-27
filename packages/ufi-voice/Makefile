@@ -7,7 +7,7 @@
 # Provenance: this package and the kernel voice patch it depends on
 # (msm89xx/patches/873-*) come from @isprogrammer's voice_calls_new branch,
 # https://github.com/isprogrammer/msm8916-openwrt/tree/voice_calls_new --
-# imsdcm is his file unchanged, ufi-voiced is his with our call-handling
+# imsdcm and ufi-voiced include local protocol, recovery and call-handling
 # additions. The q6voice driver under it is Stephan Gerhold's, from
 # msm8916-mainline. File-by-file record: Docs/Modem Stability/221_VOLTE_GUIDE.md §17.
 
@@ -15,7 +15,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=ufi-voice
 PKG_VERSION:=1.0
-PKG_RELEASE:=28
+PKG_RELEASE:=30
 PKG_LICENSE:=GPL-2.0-only
 
 include $(INCLUDE_DIR)/package.mk

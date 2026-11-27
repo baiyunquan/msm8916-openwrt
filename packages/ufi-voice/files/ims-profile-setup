@@ -31,9 +31,10 @@ if [ ! -e "$DEV" ]; then
 	exit 1
 fi
 
-# Keep the two tested IMS enable flags in EFS on UFI103S v05. Other boards can
-# use different modem profiles, so leave their EFS configuration untouched.
-# These NV items persist and the command is a no-op once both already equal 01.
+# Keep the two tested IMS enable flags in EFS on UFI103S v05. The voice-domain
+# preference is carrier- and user-specific, so set it explicitly per device;
+# do not overwrite it on each modem restart. Other boards can use different
+# modem profiles, so leave their EFS configuration untouched.
 if [ "$(cat /tmp/sysinfo/board_name 2>/dev/null)" = "thwc,ufi103s-v05" ]; then
 	if ! /usr/sbin/volte-setup apply-ims-flags >/dev/null 2>&1; then
 		log "could not verify UFI103S IMS enable flags through DIAG"

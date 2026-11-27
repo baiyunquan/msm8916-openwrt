@@ -115,6 +115,12 @@ boot_nudge() {
 		st=$(qmicli -d "$QMI" --device-open-proxy \
 			--imsa-get-ims-registration-status 2>/dev/null |
 			sed -n "s/.*Status: '\(.*\)'/\1/p")
+		# DPM.1.0 reports registration in a legacy one-byte TLV that
+		# qmicli does not decode. Use the raw-QMI compatibility reader when
+		# qmicli returned no status, so a cold boot still gets its one nudge.
+		if [ -z "$st" ] && [ -x /usr/sbin/ufi-ims-policy ]; then
+			st=$(timeout 20 /usr/sbin/ufi-ims-policy --status 2>/dev/null)
+		fi
 		[ "$st" = registered ] && return 0
 		sleep 2
 		i=$((i + 1))
