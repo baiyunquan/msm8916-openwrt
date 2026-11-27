@@ -3,6 +3,7 @@
 # with the ROW Gen_3GPP MCFG active).
 #
 #   volte-setup status            show the IMS items and the IMS state
+#   volte-setup apply-ims-flags   persist only the two IMS enable flags
 #   volte-setup apply [--restart] write the missing items, sync the EFS
 #
 # apply writes only what differs:
@@ -16,6 +17,7 @@
 LOCK=/var/lock/himi-ok-diag.lock
 TMP=/tmp/volte-setup.$$
 IMS=/nv/item_files/ims
+EFS_SYNC_PENDING=/tmp/volte-setup-efs-sync.pending
 
 efs() { flock "$LOCK" diag_efs "$@"; }
 
@@ -27,14 +29,46 @@ efs_hex() {
 }
 
 put_hex() {
-	printf "$(echo "$2" | sed 's/../\\x&/g')" > "$TMP.p"
-	efs put "$TMP.p" "$1" 2>&1 | tail -n1
+	printf "$(echo "$2" | sed 's/../\\x&/g')" > "$TMP.p" || return 1
+	touch "$EFS_SYNC_PENDING" || { rm -f "$TMP.p"; return 1; }
+	out=$(efs put "$TMP.p" "$1" 2>&1)
+	rc=$?
 	rm -f "$TMP.p"
+	if [ "$rc" -ne 0 ]; then
+		printf '%s\n' "$out" >&2
+		return "$rc"
+	fi
+	printf '%s\n' "$out" | tail -n1
 }
 
 efs_sync() {
-	flock "$LOCK" diag_logtool req 4b13300001002f00 0x4b >/dev/null 2>&1
+	flock "$LOCK" diag_logtool efs-sync || return 1
 	sleep 3
+}
+
+apply_ims_flags() {
+	changed=0
+	if ! flock "$LOCK" diag_efs detect >/dev/null 2>&1; then
+		echo "DIAG EFS is unavailable" >&2
+		return 1
+	fi
+	if [ "$(efs_hex "$IMS/IMS_enable")" != "01" ]; then
+		put_hex "$IMS/IMS_enable" 01 || return 1
+		changed=1
+	fi
+	if [ "$(efs_hex "$IMS/ims_hybrid_enable")" != "01" ]; then
+		put_hex "$IMS/ims_hybrid_enable" 01 || return 1
+		changed=1
+	fi
+	if [ -e "$EFS_SYNC_PENDING" ]; then
+		efs_sync || { echo "EFS sync failed; will retry during the next IMS setup" >&2; return 1; }
+		rm -f "$EFS_SYNC_PENDING"
+	fi
+	if [ "$changed" = 1 ]; then
+		echo "IMS enable flags updated; EFS sync accepted; restart the modem to use them"
+	else
+		echo "IMS enable flags already set"
+	fi
 }
 
 status() {
@@ -53,20 +87,34 @@ status() {
 
 apply() {
 	changed=0
-	[ "$(efs_hex $IMS/IMS_enable)" = "01" ] || { put_hex $IMS/IMS_enable 01; changed=1; }
-	[ "$(efs_hex $IMS/ims_hybrid_enable)" = "01" ] || { put_hex $IMS/ims_hybrid_enable 01; changed=1; }
+	[ "$(efs_hex $IMS/IMS_enable)" = "01" ] || {
+		put_hex "$IMS/IMS_enable" 01 || return 1
+		changed=1
+	}
+	[ "$(efs_hex $IMS/ims_hybrid_enable)" = "01" ] || {
+		put_hex "$IMS/ims_hybrid_enable" 01 || return 1
+		changed=1
+	}
 	[ "$(efs_hex /nv/item_files/modem/mmode/voice_domain_pref)" = "03" ] ||
-		{ put_hex /nv/item_files/modem/mmode/voice_domain_pref 03; changed=1; }
+		{
+			put_hex /nv/item_files/modem/mmode/voice_domain_pref 03 || return 1
+			changed=1
+		}
 	reg=$(efs_hex $IMS/qp_ims_reg_config)
 	if [ ${#reg} -eq 810 ] && [ "$(echo "$reg" | cut -c5-10)" = "000000" ]; then
-		put_hex $IMS/qp_ims_reg_config "$(echo "$reg" | cut -c1-4)696d73$(echo "$reg" | cut -c11-)"
+		put_hex "$IMS/qp_ims_reg_config" "$(echo "$reg" | cut -c1-4)696d73$(echo "$reg" | cut -c11-)" || return 1
 		changed=1
 	elif [ ${#reg} -ne 810 ]; then
 		echo "qp_ims_reg_config missing or unexpected size: activate the Gen_3GPP MCFG first" >&2
 	fi
-	if [ $changed = 1 ]; then
-		efs_sync
-		echo "EFS updated and synced"
+	if [ $changed = 1 ] || [ -e "$EFS_SYNC_PENDING" ]; then
+		efs_sync || { echo "EFS sync failed; rerun volte-setup to retry" >&2; return 1; }
+		rm -f "$EFS_SYNC_PENDING"
+		if [ "$changed" = 1 ]; then
+			echo "EFS updated and sync accepted"
+		else
+			echo "pending EFS sync accepted"
+		fi
 		if [ "$1" = "--restart" ]; then
 			r=$(grep -l 4080000.remoteproc /sys/class/remoteproc/*/name | head -n1)
 			r=${r%/name}
@@ -82,6 +130,7 @@ apply() {
 
 case "$1" in
 	status) status ;;
+	apply-ims-flags) apply_ims_flags ;;
 	apply) apply "$2" ;;
 	*) sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
 esac

@@ -93,15 +93,24 @@ volte-setup status            # MCFG, the items, IMS registration, SMS/voice ser
 volte-setup apply --restart   # write what differs, sync the EFS, restart the modem
 ```
 
+On **UFI103S v05**, `ims-profile-setup` also checks and persists only the two
+confirmed enable bytes (`IMS_enable=01` and `ims_hybrid_enable=01`) during modem
+startup/restart. This is board-gated; the other UFI voice boards keep their
+existing EFS profile. The `ufi-voice` package includes `qmi-raw`, which the IMS
+profile setup uses to set the WDS IMCN and PCSCF-via-PCO flags.
+
 How it works, in case it has to be done by hand:
 
 - EFS access goes over DIAG with `diag_efs` (package `diag-logtool`),
   always under `flock /var/lock/himi-ok-diag.lock`, the same lock as the
   NV 2500 guard. Two DIAG users at once hang `/dev/diag` writes.
 - **EFS writes live in the modem's RAM copy** until the modem syncs EFS to
-  `modemst1/2` through `rmt_storage`. A reboot within ~15 minutes of a write
-  loses it. `volte-setup` forces a sync with the DIAG EFS2 sync request:
-  `flock $LOCK diag_logtool req 4b13300001002f00 0x4b`.
+  `modemst1/2` through `rmt_storage`. A reboot before the sync is accepted can
+  lose it. `volte-setup` requests a journal sync with
+  `flock $LOCK diag_logtool efs-sync`; the command checks the modem's EFS
+  result, rather than only matching a generic DIAG response byte. The modem's
+  later sync-status response is not reliable on this firmware, so acceptance
+  is confirmed and completion is treated as best-effort.
 - The modem reads the items when it starts: restart it afterwards
   (`echo stop`/`echo start` to the `4080000.remoteproc` remoteproc's
   `state`, or reboot).

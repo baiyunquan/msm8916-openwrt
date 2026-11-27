@@ -323,6 +323,11 @@ static void put_le32(unsigned char *p, uint32_t v) {
     p[3] = (unsigned char)((v >> 24) & 0xFF);
 }
 
+static uint32_t get_le32(const unsigned char *p) {
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+           ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
 /* ------------------------------------------------------------------ */
 
 static int cmd_raw(const char *hex) {
@@ -555,6 +560,39 @@ static int cmd_req(const char *hex, unsigned int expect) {
     return 0;
 }
 
+/* Start an EFS2 journal sync and validate the modem's EFS errno.  Generic
+ * `req` only matches a DIAG response byte, which is not enough to distinguish
+ * an accepted sync from an EFS error (and it treats timeout as success). */
+static int cmd_efs_sync(void) {
+    static const unsigned char req[] = {
+        0x4b, 0x13, 0x30, 0x00, 0x01, 0x00, '/', 0x00
+    };
+    unsigned char resp[BUFSZ];
+
+    drain_quiet(150);
+    if (send_payload(req, (int)sizeof(req)) < 0) return 1;
+
+    int r = read_reply(0x4b, resp, sizeof(resp), 5000);
+    if (r == 0) {
+        fprintf(stderr, "EFS sync: timed out waiting for modem reply\n");
+        return 1;
+    }
+    if (r < 14 || memcmp(resp, req, 4) != 0) {
+        fprintf(stderr, "EFS sync: malformed response (%d bytes)\n", r);
+        return 1;
+    }
+
+    uint32_t token = get_le32(resp + 6);
+    int32_t err = (int32_t)get_le32(resp + 10);
+    if (err != 0) {
+        fprintf(stderr, "EFS sync: modem refused request (EFS errno=%d)\n", err);
+        return 1;
+    }
+
+    printf("EFS sync accepted by modem (token=%u)\n", token);
+    return 0;
+}
+
 /*
  * HDLC-frame a payload and send it, then wait for a reply.  Required on the
  * DIAG_CMD (request/response) channel, whose endpoint has encode_hdlc set.
@@ -754,6 +792,7 @@ int main(int argc, char **argv) {
 "  selftest                     Open the DIAG port and report what it finds\n"
 "  raw <hexbytes>               Send raw bytes, print the reply\n"
 "  req <hexbytes> <expect_code> Send and match the reply code (skips F3)\n"
+"  efs-sync                     Start EFS2 journal sync and check its status\n"
 "  hdlc <hexbytes> <expect_code> [lead]\n"
 "                               HDLC-framed request (for DIAG_CMD)\n"
 "  listen <seconds>             Print incoming messages for N seconds\n"
@@ -826,6 +865,8 @@ int main(int argc, char **argv) {
         rc = cmd_raw(argv[2]);
     } else if (!strcmp(argv[1], "req") && argc >= 3) {
         rc = cmd_req(argv[2], argc >= 4 ? (unsigned int)strtoul(argv[3], NULL, 0) : 0);
+    } else if (!strcmp(argv[1], "efs-sync") && argc == 2) {
+        rc = cmd_efs_sync();
     } else if (!strcmp(argv[1], "hdlc") && argc >= 3) {
         rc = cmd_hdlc(argv[2], argc >= 4 ? (unsigned int)strtoul(argv[3], NULL, 0) : 0,
                       argc >= 5 ? atoi(argv[4]) : 1);
