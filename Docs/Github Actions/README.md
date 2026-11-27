@@ -399,13 +399,20 @@ script.
 
 ### The signing key
 
+This fork uses its own persistent `APK_SIGNING_KEY` repository secret. Its public
+half is installed by base-files as `/etc/apk/keys/baiyunquan.pem`, alongside the
+upstream key so both feeds remain trusted. The private key must never be committed.
+For a new fork, create an EC P-256 key, upload it with `gh secret set APK_SIGNING_KEY`,
+and commit only the matching public PEM under `msm89xx/base-files/etc/apk/keys/`.
+
 OpenWrt signs every `packages.adb`. A device rejects a feed whose key it does not have, with
 `UNTRUSTED signature`.
 
 - **Secret:** `APK_SIGNING_KEY` holds the EC P-256 private key (PEM).
 - **CI:** written to `openwrt/private-key.pem`; the job fails if the secret is unset.
-- **Image:** the matching public key is embedded at `/etc/apk/keys/akbar-npj-v25.12.6.pem` and
-  re-created by `99-msm89xx-firstboot`.
+- **Image:** this fork's matching public key is embedded at `/etc/apk/keys/baiyunquan.pem`.
+  The upstream key at `/etc/apk/keys/akbar-npj-v25.12.6.pem` is also retained and
+  re-created by `99-msm89xx-firstboot` when missing.
 - **Published:** copied to every release dir and to the stable path
   `https://akbar-npj.github.io/msm8916-openwrt/public-key.pem`.
 
@@ -414,8 +421,8 @@ key, so a device carrying a stale key recovers without a reflash. It also warns 
 longer offers the device's own kernel — the condition that actually breaks kmod installs.
 
 > **Rotating the key:** generate a new EC P-256 pair, update the secret, replace the tracked public
-> key in `msm89xx/base-files/etc/apk/keys/` **and** the heredoc in `99-msm89xx-firstboot`, then cut
-> a release.
+> key in `msm89xx/base-files/etc/apk/keys/baiyunquan.pem`, then cut a release. The
+> upstream key and its firstboot heredoc belong to the upstream feed.
 
 ### Pruning
 
